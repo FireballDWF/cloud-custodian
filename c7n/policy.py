@@ -478,8 +478,9 @@ class LambdaMode(PolicyExecutionMode):
         p = variables.copy()
         if 'mode' in variables['policy']:
             mode = variables['policy']['mode'].copy()
+            self.policy.log.info("role=%s account_id=%s", mode['role'], variables['account_id'])
             mode['role'] = mode['role'].format(**variables)
-            self.policy.log.info("mode=%s", mode)
+            self.policy.log.info("mode=%s role=%s", mode, mode['roleß'])
             p['mode'] = mode
         return p
 
