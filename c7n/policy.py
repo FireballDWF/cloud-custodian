@@ -474,7 +474,7 @@ class LambdaMode(PolicyExecutionMode):
     def expand_variables(self, variables):
         """expand any variables in the action to_from/cc_from fields.
         """
-        self.policy.log.info("variables=%s account_id=%s", variables, variables.account_id)
+        self.policy.log.info("variables=%s", variables)
         p = variables.data.copy()
         if 'mode' in variables.policy.data:
             mode = variables.policy.data['mode'].copy()
