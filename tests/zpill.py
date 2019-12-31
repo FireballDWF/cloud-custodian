@@ -13,20 +13,21 @@
 # limitations under the License.
 from __future__ import absolute_import, division, print_function, unicode_literals
 
-from datetime import datetime, timedelta, tzinfo
 import fnmatch
 import json
-import unittest
 import os
 import shutil
 import zipfile
+from datetime import datetime, timedelta, tzinfo
+from distutils.util import strtobool
 
 import boto3
-from botocore.response import StreamingBody
-import jmespath
-from placebo import pill
 import placebo
+from botocore.response import StreamingBody
+from placebo import pill
 from six import StringIO
+
+from c7n.testing import CustodianTestCore
 
 ###########################################################################
 # BEGIN PLACEBO MONKEY PATCH
@@ -234,6 +235,7 @@ class ZippedPill(pill.Pill):
         while next_file is None:
             index = self._index.setdefault(base_name, 1)
             fn = os.path.join(self._data_path, base_name + "_{0}.json".format(index))
+            fn = fn.replace('\\', '/')
             if fn in self._files:
                 next_file = fn
                 self._index[base_name] += 1
@@ -252,7 +254,7 @@ def attach(session, data_path, prefix=None, debug=False):
     return pill
 
 
-class PillTest(unittest.TestCase):
+class PillTest(CustodianTestCore):
 
     archive_path = os.path.join(
         os.path.dirname(os.path.abspath(__file__)), "placebo_data.zip"
@@ -267,10 +269,6 @@ class PillTest(unittest.TestCase):
     )
 
     recording = False
-
-    def assertJmes(self, expr, instance, expected):
-        value = jmespath.search(expr, instance)
-        self.assertEqual(value, expected)
 
     def cleanUp(self):
         self.pill = None
@@ -313,7 +311,7 @@ class PillTest(unittest.TestCase):
         default region. It is unused when replaying stored data.
         """
 
-        if os.environ.get("C7N_FUNCTIONAL") == "yes":
+        if strtobool(os.environ.get('C7N_FUNCTIONAL', 'no')):
             self.recording = True
             return lambda region=region, assume=None: boto3.Session(region_name=region)
 

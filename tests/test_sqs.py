@@ -20,16 +20,16 @@ import json
 import time
 
 
-class TestSqsAction(BaseTest):
+class TestSqs(object):
 
     @functional
-    def test_sqs_delete(self):
-        session_factory = self.replay_flight_data("test_sqs_delete")
+    def test_sqs_delete(self, test):
+        session_factory = test.replay_flight_data("test_sqs_delete")
         client = session_factory().client("sqs")
         client.create_queue(QueueName="test-sqs")
         queue_url = client.get_queue_url(QueueName="test-sqs")["QueueUrl"]
 
-        p = self.load_policy(
+        p = test.load_policy(
             {
                 "name": "sqs-delete",
                 "resource": "sqs",
@@ -39,14 +39,14 @@ class TestSqsAction(BaseTest):
             session_factory=session_factory,
         )
         resources = p.run()
-        self.assertEqual(len(resources), 1)
-        self.assertRaises(ClientError, client.purge_queue, QueueUrl=queue_url)
-        if self.recording:
+        test.assertEqual(len(resources), 1)
+        test.assertRaises(ClientError, client.purge_queue, QueueUrl=queue_url)
+        if test.recording:
             time.sleep(60)
 
     @functional
-    def test_sqs_set_encryption(self):
-        session_factory = self.replay_flight_data("test_sqs_set_encryption")
+    def test_sqs_set_encryption(self, test):
+        session_factory = test.replay_flight_data("test_sqs_set_encryption")
 
         client_sqs = session_factory().client("sqs")
         client_sqs.create_queue(QueueName="sqs-test")
@@ -54,10 +54,10 @@ class TestSqsAction(BaseTest):
 
         def cleanup():
             client_sqs.delete_queue(QueueUrl=queue_url)
-            if self.recording:
+            if test.recording:
                 time.sleep(60)
 
-        self.addCleanup(cleanup)
+        test.addCleanup(cleanup)
 
         client_kms = session_factory().client("kms")
         key_id = client_kms.create_key(Description="West SQS encryption key")[
@@ -65,16 +65,16 @@ class TestSqsAction(BaseTest):
         ][
             "KeyId"
         ]
-        self.addCleanup(client_kms.disable_key, KeyId=key_id)
+        test.addCleanup(client_kms.disable_key, KeyId=key_id)
 
         alias_name = "alias/new-key-test-sqs"
-        self.addCleanup(client_kms.delete_alias, AliasName=alias_name)
+        test.addCleanup(client_kms.delete_alias, AliasName=alias_name)
         client_kms.create_alias(AliasName=alias_name, TargetKeyId=key_id)
 
-        if self.recording:
+        if test.recording:
             time.sleep(30)
 
-        p = self.load_policy(
+        p = test.load_policy(
             {
                 "name": "sqs-delete",
                 "resource": "sqs",
@@ -92,7 +92,10 @@ class TestSqsAction(BaseTest):
         ][
             "KmsMasterKeyId"
         ]
-        self.assertEqual(check_master_key, key_id)
+        test.assertEqual(check_master_key, key_id)
+
+
+class TestSqsAction(BaseTest):
 
     @functional
     def test_sqs_remove_matched(self):
@@ -264,6 +267,9 @@ class TestSqsAction(BaseTest):
         queue_url = client.create_queue(QueueName=name)["QueueUrl"]
         self.addCleanup(client.delete_queue, QueueUrl=queue_url)
 
+        if self.recording:
+            time.sleep(15)
+
         p = self.load_policy(
             {
                 "name": "sqs-mark-for-op",
@@ -290,9 +296,12 @@ class TestSqsAction(BaseTest):
     def test_sqs_tag(self):
         session_factory = self.replay_flight_data("test_sqs_tags")
         client = session_factory().client("sqs")
-        name = "test-sqs"
+        name = "test-sqs-5"
         queue_url = client.create_queue(QueueName=name)["QueueUrl"]
         self.addCleanup(client.delete_queue, QueueUrl=queue_url)
+
+        if self.recording:
+            time.sleep(15)
 
         p = self.load_policy(
             {
@@ -319,12 +328,15 @@ class TestSqsAction(BaseTest):
     def test_sqs_remove_tag(self):
         session_factory = self.replay_flight_data("test_sqs_remove_tag")
         client = session_factory().client("sqs")
-        name = "test-sqs"
+        name = "test-sqs-4"
         queue_url = client.create_queue(QueueName=name)["QueueUrl"]
         client.tag_queue(
             QueueUrl=queue_url, Tags={"remove-this-tag": "tag to be removed"}
         )
         self.addCleanup(client.delete_queue, QueueUrl=queue_url)
+
+        if self.recording:
+            time.sleep(15)
 
         p = self.load_policy(
             {
@@ -413,3 +425,44 @@ class TestSqsAction(BaseTest):
         self.assertEqual(resources[0]["QueueUrl"], url1)
         resources = p.resource_manager.get_resources([url2])
         self.assertEqual(resources[0]["QueueUrl"], url1)
+
+    @functional
+    def test_sqs_kms_alias(self):
+        session_factory = self.replay_flight_data("test_sqs_kms_key_filter")
+
+        p = self.load_policy(
+            {
+                "name": "sqs-kms-alias",
+                "resource": "sqs",
+                "filters": [
+                    {
+                        "or": [
+                            {
+                                "type": "value",
+                                "key": "KmsMasterKeyId",
+                                "value": "^(alias/aws/)",
+                                "op": "regex"
+                            },
+                            {
+                                "type": "kms-key",
+                                "key": "c7n:AliasName",
+                                "value": "^(alias/aws/)",
+                                "op": "regex"
+                            }
+                        ]
+                    }
+                ]
+            },
+            session_factory=session_factory,
+        )
+        resources = p.run()
+        self.assertEqual(2, len(resources))
+        for r in resources:
+            self.assertTrue(r['KmsMasterKeyId'] in [
+                u'alias/aws/sqs',
+                u'arn:aws:kms:us-east-1:644160558196:key/8785aeb9-a616-4e2b-bbd3-df3cde76bcc5'
+            ])
+            self.assertTrue(r['QueueArn'] in [
+                u'arn:aws:sqs:us-east-1:644160558196:sqs-test-alias',
+                u'arn:aws:sqs:us-east-1:644160558196:sqs-test-id'
+            ])

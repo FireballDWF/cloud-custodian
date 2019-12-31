@@ -19,14 +19,23 @@ import sys
 import tempfile
 import time
 
+import six
 from botocore.exceptions import ClientError
 from dateutil.parser import parse as parse_date
-import six
+import mock
 
 from c7n import ipaddress, utils
 from c7n.config import Config
-
 from .common import BaseTest
+
+
+class TestTesting(BaseTest):
+
+    def test_assert_regex(self):
+        self.assertRaises(
+            AssertionError,
+            self.assertRegex,
+            "^hello", "not hello world")
 
 
 class Backoff(BaseTest):
@@ -69,49 +78,56 @@ class Backoff(BaseTest):
             self.assertTrue(i < maxv)
 
 
-class WorkerDecorator(BaseTest):
+class UrlConfTest(BaseTest):
 
-    def test_method_worker(self):
+    def test_parse_url(self):
+        self.assertEqual(
+            dict(utils.parse_url_config('aws://target?format=json&region=us-west-2')),
+            dict(url='aws://target?format=json&region=us-west-2',
+                 netloc='target',
+                 path='',
+                 scheme='aws',
+                 region='us-west-2',
+                 format='json'))
 
-        class foo(object):
+        self.assertEqual(
+            dict(utils.parse_url_config('')),
+            {'netloc': '', 'path': '', 'scheme': '', 'url': ''})
 
-            @utils.worker
-            def bar(self, err=False):
-                """abc"""
-                if err:
-                    raise ValueError("foo")
-                return 42
+        self.assertEqual(
+            dict(utils.parse_url_config('aws')),
+            {'path': '', 'scheme': 'aws', 'netloc': '', 'url': 'aws://'})
 
-        i = foo()
-        log_output = self.capture_logging("c7n.worker")
-        self.assertEqual(i.bar(), 42)
-        self.assertRaises(ValueError, i.bar, True)
-        self.assertTrue(
-            log_output.getvalue().startswith(
-                "Error invoking tests.test_utils.bar\nTraceback"
-            )
-        )
+        self.assertEqual(
+            dict(utils.parse_url_config('aws://')),
+            {'path': '', 'scheme': 'aws', 'netloc': '', 'url': 'aws://'})
 
-    def test_function_worker(self):
 
-        @utils.worker
-        def rabbit(err=False):
-            """what's up doc"""
-            if err:
-                raise ValueError("more carrots")
-            return 42
+class ProxyUrlTest(BaseTest):
+    @mock.patch('c7n.utils.getproxies', return_value={})
+    def test_no_proxy(self, get_proxies_mock):
+        self.assertEqual(None, utils.get_proxy_url('http://web.site'))
 
-        self.assertEqual(rabbit.__doc__, "what's up doc")
-        log_output = self.capture_logging("c7n.worker")
-        self.assertEqual(rabbit(), 42)
-        self.assertEqual(log_output.getvalue(), "")
-        self.assertRaises(ValueError, rabbit, True)
-        self.assertTrue(
-            log_output.getvalue().startswith(
-                "Error invoking tests.test_utils.rabbit\nTraceback"
-            )
-        )
-        self.assertTrue("more carrots" in log_output.getvalue())
+    def test_http_proxy_with_full_url(self):
+        with mock.patch.dict(os.environ,
+                             {'http_proxy': 'http://mock.http.proxy.server:8000'},
+                             clear=True):
+            proxy_url = utils.get_proxy_url('http://web.site')
+            self.assertEqual(proxy_url, 'http://mock.http.proxy.server:8000')
+
+    def test_http_proxy_with_relative_url(self):
+        with mock.patch.dict(os.environ,
+                             {'http_proxy': 'http://mock.http.proxy.server:8000'},
+                             clear=True):
+            proxy_url = utils.get_proxy_url('/relative/url')
+            self.assertEqual(proxy_url, None)
+
+    def test_all_proxy_with_full_url(self):
+        with mock.patch.dict(os.environ,
+                             {'all_proxy': 'http://mock.all.proxy.server:8000'},
+                             clear=True):
+            proxy_url = utils.get_proxy_url('http://web.site')
+            self.assertEqual(proxy_url, 'http://mock.all.proxy.server:8000')
 
 
 class UtilTest(BaseTest):
@@ -150,7 +166,7 @@ class UtilTest(BaseTest):
 
     def test_group_by(self):
         sorter = lambda x: x  # NOQA E731
-        sorter = sys.version_info.major is 2 and sorted or sorter
+        sorter = sys.version_info.major == 2 and sorted or sorter
         items = [{}, {"Type": "a"}, {"Type": "a"}, {"Type": "b"}]
         self.assertEqual(
             sorter(list(utils.group_by(items, "Type").keys())), [None, "a", "b"]
@@ -222,6 +238,12 @@ class UtilTest(BaseTest):
         self.assertEqual(
             utils.generate_arn("s3", "my_bucket"), "arn:aws:s3:::my_bucket"
         )
+
+        self.assertEqual(
+            utils.generate_arn("s3", "my_bucket", region="us-gov-west-1"),
+            "arn:aws-us-gov:s3:::my_bucket"
+        )
+
         self.assertEqual(
             utils.generate_arn(
                 "cloudformation",

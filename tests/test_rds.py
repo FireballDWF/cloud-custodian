@@ -365,7 +365,7 @@ class RDSTest(BaseTest):
             session_factory=session_factory,
         )
         resources = p.run()
-        self.assertEqual(len(resources), 6)
+        self.assertEqual(len(resources), 5)
 
     def test_rds_retention_copy_tags(self):
         session_factory = self.replay_flight_data("test_rds_retention")
@@ -379,7 +379,7 @@ class RDSTest(BaseTest):
             session_factory=session_factory,
         )
         resources = p.run()
-        self.assertEqual(len(resources), 6)
+        self.assertEqual(len(resources), 5)
 
     def test_rds_restore(self):
         self.patch(rds.RestoreInstance, "executor_factory", MainThreadExecutor)
@@ -476,15 +476,7 @@ class RDSTest(BaseTest):
                 "name": "rds-upgrade-available",
                 "resource": "rds",
                 "filters": [{"type": "upgrade-available", "major": True}],
-                "actions": [
-                    {
-                        "type": "mark-for-op",
-                        "tag": "custodian_upgrade",
-                        "days": 1,
-                        "msg": "Minor engine upgrade available: {op}@{action_date}",
-                        "op": "upgrade",
-                    }
-                ],
+                "actions": []
             },
             session_factory=session_factory,
         )
@@ -542,15 +534,27 @@ class RDSTest(BaseTest):
         self.assertEqual(resources[0]["c7n-rds-engine-upgrade"], "5.6.35")
 
     def test_rds_eligible_start_stop(self):
-        resource = {"DBInstanceIdentifier": "ABC", "DBInstanceStatus": "available"}
+        resource = {"DBInstanceIdentifier": "ABC",
+                    "DBInstanceStatus": "available",
+                    "Engine": "mysql"}
         self.assertTrue(rds._eligible_start_stop(resource, "available"))
 
-        resource = {"DBInstanceIdentifier": "ABC", "DBInstanceStatus": "stopped"}
+        resource = {"DBInstanceIdentifier": "ABC",
+                    "DBInstanceStatus": "stopped",
+                    "Engine": "mysql"}
         self.assertFalse(rds._eligible_start_stop(resource, "available"))
 
         resource = {
             "DBInstanceIdentifier": "ABC",
             "DBInstanceStatus": "available",
+            "Engine": "postgres",
+            "MultiAZ": True,
+        }
+        self.assertTrue(rds._eligible_start_stop(resource))
+        resource = {
+            "DBInstanceIdentifier": "ABC",
+            "DBInstanceStatus": "available",
+            "Engine": "sqlserver-ee",
             "MultiAZ": True,
         }
         self.assertFalse(rds._eligible_start_stop(resource))
@@ -558,6 +562,14 @@ class RDSTest(BaseTest):
         resource = {
             "DBInstanceIdentifier": "ABC",
             "DBInstanceStatus": "available",
+            "Engine": "docdb"
+        }
+        self.assertFalse(rds._eligible_start_stop(resource))
+
+        resource = {
+            "DBInstanceIdentifier": "ABC",
+            "DBInstanceStatus": "available",
+            "Engine": "postgres",
             "ReadReplicaDBInstanceIdentifiers": ["sbbdevslave"],
         }
         self.assertFalse(rds._eligible_start_stop(resource))
@@ -565,6 +577,7 @@ class RDSTest(BaseTest):
         resource = {
             "DBInstanceIdentifier": "ABC",
             "DBInstanceStatus": "available",
+            "Engine": "mysql",
             "ReadReplicaSourceDBInstanceIdentifier": "sbbdev",
         }
         self.assertFalse(rds._eligible_start_stop(resource))
@@ -915,7 +928,7 @@ class RDSSnapshotTest(BaseTest):
         def brooklyn(delay):
             return
 
-        output = self.capture_logging("c7n.worker", level=logging.DEBUG)
+        output = self.capture_logging("c7n.retry", level=logging.DEBUG)
         self.patch(time, "sleep", brooklyn)
         self.change_environment(AWS_DEFAULT_REGION="us-east-1")
         p = self.load_policy(
@@ -1241,6 +1254,36 @@ class TestModifyVpcSecurityGroupsAction(BaseTest):
         self.assertEqual(len(clean_resources[0]["VpcSecurityGroups"]), 2)
         self.assertEqual(len(clean_resources), 4)
 
+    def test_rds_filter_by_vpcid(self):
+        #
+        # Test conditions:
+        # Purpose of test is only to validate checking vpc filtered ID with DBSubnetGroup.VpcId
+        # Uses the add_security_group data--should match 4 DB instances (all in the filtered VPC)
+        # Checks that the expected VPC is present
+
+        session_factory = self.replay_flight_data("test_rds_add_security_group")
+        p = self.load_policy(
+            {
+                "name": "filter-by-vpcid",
+                "resource": "rds",
+                "filters": [
+                    {
+                        "type": "vpc",
+                        "key": "VpcId",
+                        "value": "vpc-09b75e60",
+                        "op": "eq",
+                    },
+                ],
+                "actions": [{"type": "modify-security-groups", "add": "sg-6360920a"}],
+            },
+            session_factory=session_factory,
+        )
+
+        resources = p.run()
+
+        self.assertEqual(len(resources), 4)
+        self.assertEqual("vpc-09b75e60", resources[0]["DBSubnetGroup"]["VpcId"])
+
 
 class TestHealthEventsFilter(BaseTest):
 
@@ -1455,3 +1498,18 @@ class Resize(BaseTest):
         wait_until("modifying")
         wait_until("available")
         self.assertEqual(describe()["AllocatedStorage"], 6)  # nearest gigabyte
+
+
+class TestReservedRDSInstance(BaseTest):
+    def test_reserved_rds_instance_query(self):
+        session_factory = self.replay_flight_data("test_reserved_rds_instance_query")
+        p = self.load_policy(
+            {
+                "name": "filter-rds-reserved-instances",
+                "resource": "aws.rds-reserved"
+            },
+            session_factory=session_factory,
+        )
+        resources = p.run()
+        self.assertEqual(len(resources), 1)
+        self.assertEqual(resources[0]["ReservedDBInstanceId"], "ri-2019-05-06-14-19-06-332")

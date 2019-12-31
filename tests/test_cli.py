@@ -18,10 +18,14 @@ import os
 import sys
 
 from argparse import ArgumentTypeError
-from c7n import cli, version, commands
 from datetime import datetime, timedelta
 
+from c7n import cli, version, commands
+from c7n.resolver import ValuesFrom
 from c7n.resources import aws
+from c7n.schema import ElementSchema, generate
+from c7n.utils import yaml_dump
+
 from .common import BaseTest, TextTestIO
 
 
@@ -102,11 +106,19 @@ class VersionTest(CliTest):
     def test_debug_version(self):
         output = self.get_output(["custodian", "version", "--debug"])
         # Among other things, this should print sys.path
+        # Normalize double escaped backslashes for Windows
+        output = output.replace('\\\\', '\\')
+
         self.assertIn(version.version, output)
         self.assertIn(sys.path[0], output)
 
 
 class ValidateTest(CliTest):
+
+    def test_invalidate_structure_exit(self):
+        invalid_policies = {"policies": [{"name": "foo"}]}
+        yaml_file = self.write_policy_file(invalid_policies)
+        self.run_and_expect_failure(["custodian", "validate", yaml_file], 1)
 
     def test_validate(self):
         invalid_policies = {
@@ -172,8 +184,17 @@ class SchemaTest(CliTest):
         # json option
         self.run_and_expect_success(["custodian", "schema", "--json"])
 
+        # with just a cloud
+        self.run_and_expect_success(["custodian", "schema", "aws"])
+
         # with just a resource
         self.run_and_expect_success(["custodian", "schema", "ec2"])
+
+        # with just a mode
+        self.run_and_expect_success(["custodian", "schema", "mode"])
+
+        # mode.type
+        self.run_and_expect_success(["custodian", "schema", "mode.phd"])
 
         # resource.actions
         self.run_and_expect_success(["custodian", "schema", "ec2.actions"])
@@ -203,7 +224,18 @@ class SchemaTest(CliTest):
     def test_schema_output(self):
 
         output = self.get_output(["custodian", "schema"])
-        self.assertIn("ec2", output)
+        self.assertIn("aws.ec2", output)
+        self.assertIn("azure.vm", output)
+        self.assertIn("gcp.instance", output)
+
+        output = self.get_output(["custodian", "schema", "aws"])
+        self.assertIn("aws.ec2", output)
+        self.assertNotIn("azure.vm", output)
+        self.assertNotIn("gcp.instance", output)
+
+        output = self.get_output(["custodian", "schema", "aws.ec2"])
+        self.assertIn("actions:", output)
+        self.assertIn("filters:", output)
 
         output = self.get_output(["custodian", "schema", "ec2"])
         self.assertIn("actions:", output)
@@ -215,6 +247,61 @@ class SchemaTest(CliTest):
 
         output = self.get_output(["custodian", "schema", "ec2.filters.image"])
         self.assertIn("Help", output)
+
+    def test_schema_expand(self):
+        # refs should only ever exist in a dictionary by itself
+        test_schema = {
+            '$ref': '#/definitions/filters_common/value_from'
+        }
+        result = ElementSchema.schema(generate()['definitions'], test_schema)
+        self.assertEqual(result, ValuesFrom.schema)
+
+    def test_schema_multi_expand(self):
+        test_schema = {
+            'schema1': {
+                '$ref': '#/definitions/filters_common/value_from'
+            },
+            'schema2': {
+                '$ref': '#/definitions/filters_common/value_from'
+            }
+        }
+
+        expected = yaml_dump({
+            'schema1': {
+                'type': 'object',
+                'additionalProperties': 'False',
+                'required': ['url'],
+                'properties': {
+                    'url': {'type': 'string'},
+                    'format': {'enum': ['csv', 'json', 'txt', 'csv2dict']},
+                    'expr': {'oneOf': [
+                        {'type': 'integer'},
+                        {'type': 'string'}]}
+                }
+            },
+            'schema2': {
+                'type': 'object',
+                'additionalProperties': 'False',
+                'required': ['url'],
+                'properties': {
+                    'url': {'type': 'string'},
+                    'format': {'enum': ['csv', 'json', 'txt', 'csv2dict']},
+                    'expr': {'oneOf': [
+                        {'type': 'integer'},
+                        {'type': 'string'}]}
+                }
+            }
+        })
+
+        result = yaml_dump(ElementSchema.schema(generate()['definitions'], test_schema))
+        self.assertEqual(result, expected)
+
+    def test_schema_expand_not_found(self):
+        test_schema = {
+            '$ref': '#/definitions/filters_common/invalid_schema'
+        }
+        result = ElementSchema.schema(generate()['definitions'], test_schema)
+        self.assertEqual(result, None)
 
 
 class ReportTest(CliTest):
@@ -252,6 +339,12 @@ class ReportTest(CliTest):
         )
         self.assertIn("InstanceId", output)
         self.assertIn("i-014296505597bf519", output)
+
+        # json format
+        output = self.get_output(
+            ["custodian", "report", "--format", "json", "-s", self.output_dir, yaml_file]
+        )
+        self.assertTrue("i-014296505597bf519", json.loads(output)[0]['InstanceId'])
 
         # empty file
         temp_dir = self.get_temp_dir()
@@ -594,7 +687,8 @@ class MiscTest(CliTest):
         # Doesn't do anything, but should exit 0
         temp_dir = self.get_temp_dir()
         yaml_file = self.write_policy_file({})
-        self.run_and_expect_success(["custodian", "run", "-s", temp_dir, yaml_file])
+        self.run_and_expect_failure(
+            ["custodian", "run", "-s", temp_dir, yaml_file], 1)
 
     def test_nonexistent_policy_file(self):
         temp_dir = self.get_temp_dir()

@@ -17,7 +17,7 @@ from c7n.actions import Action
 from c7n.filters.metrics import MetricsFilter
 from c7n.filters.vpc import SecurityGroupFilter, SubnetFilter
 from c7n.manager import resources
-from c7n.query import QueryResourceManager
+from c7n.query import QueryResourceManager, TypeInfo
 from c7n.utils import local_session, type_schema
 from c7n.tags import RemoveTag, Tag, TagDelayedAction, TagActionFilter
 
@@ -25,17 +25,16 @@ from c7n.tags import RemoveTag, Tag, TagDelayedAction, TagActionFilter
 @resources.register('message-broker')
 class MessageBroker(QueryResourceManager):
 
-    class resource_type(object):
+    class resource_type(TypeInfo):
         service = 'mq'
         enum_spec = ('list_brokers', 'BrokerSummaries', None)
         detail_spec = (
             'describe_broker', 'BrokerId', 'BrokerId', None)
 
         id = 'BrokerId'
+        arn = 'BrokerArn'
         name = 'BrokerName'
-        date = None
         dimension = 'Broker'
-        filter_name = None
         metrics_namespace = 'AWS/AmazonMQ'
 
     def augment(self, resources):
@@ -110,12 +109,12 @@ class TagMessageBroker(Tag):
 
     permissions = ('mq:TagMessageBroker',)
 
-    def process_resource_set(self, mq, new_tags):
-        client = local_session(self.manager.session_factory).client('mq')
-        tag_dict = {t['Key']: t['Value'] for t in new_tags}
+    def process_resource_set(self, client, mq, new_tags):
         for r in mq:
             try:
-                client.create_tags(ResourceArn=r['BrokerArn'], Tags=tag_dict)
+                client.create_tags(
+                    ResourceArn=r['BrokerArn'],
+                    Tags={t['Key']: t['Value'] for t in new_tags})
             except client.exceptions.ResourceNotFound:
                 continue
 
@@ -140,8 +139,7 @@ class UntagMessageBroker(RemoveTag):
 
     permissions = ('mq:UntagMessageBroker',)
 
-    def process_resource_set(self, mq, tags):
-        client = local_session(self.manager.session_factory).client('mq')
+    def process_resource_set(self, client, mq, tags):
         for r in mq:
             try:
                 client.delete_tags(ResourceArn=r['BrokerArn'], TagKeys=tags)
@@ -169,9 +167,3 @@ class MarkForOpMessageBroker(TagDelayedAction):
                     op: delete
                     days: 7
     """
-
-    permissions = ('mq:TagMessageBroker',)
-
-    def process_resource_set(self, resources, tags):
-        tagger = self.manager.action_registry['tag']({}, self.manager)
-        tagger.process_resource_set(resources, tags)

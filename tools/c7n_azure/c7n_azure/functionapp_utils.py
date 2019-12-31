@@ -13,6 +13,7 @@
 # limitations under the License.
 import datetime
 import logging
+import os
 import re
 import time
 
@@ -26,6 +27,7 @@ from c7n_azure.provisioning.storage_account import StorageAccountUnit
 from c7n_azure.session import Session
 from c7n_azure.storage_utils import StorageUtilities
 from c7n_azure.utils import ResourceIdParser, StringUtils
+from msrest.exceptions import HttpOperationError
 from msrestazure.azure_exceptions import CloudError
 
 from c7n.utils import local_session
@@ -109,7 +111,7 @@ class FunctionAppUtilities(object):
     def validate_function_name(function_name):
         if (function_name is None or len(function_name) > 60 or len(function_name) < 1):
             raise ValueError('Function name must be between 1-60 characters. Given name: "' +
-                str(function_name) + '"')
+                             str(function_name) + '"')
 
     @staticmethod
     def get_function_name(policy_name, suffix):
@@ -148,15 +150,19 @@ class FunctionAppUtilities(object):
 
             # upload package
             blob_name = '%s.zip' % function_params.function_app_name
-            blob_client.create_blob_from_path(
-                FUNCTION_CONSUMPTION_BLOB_CONTAINER, blob_name, package.pkg.path)
+            packageToPublish = package.pkg.get_stream()
+            count = os.path.getsize(package.pkg.path)
+
+            blob_client.create_blob_from_stream(
+                FUNCTION_CONSUMPTION_BLOB_CONTAINER, blob_name, packageToPublish, count)
+            packageToPublish.close()
 
             # create blob url for package
             sas = blob_client.generate_blob_shared_access_signature(
                 FUNCTION_CONSUMPTION_BLOB_CONTAINER,
                 blob_name,
-                BlobPermissions.READ,
-                datetime.datetime.utcnow() +
+                permission=BlobPermissions.READ,
+                expiry=datetime.datetime.utcnow() +
                 datetime.timedelta(days=FUNCTION_PACKAGE_SAS_EXPIRY_DAYS)
                 # expire in 10 years
             )
@@ -177,15 +183,18 @@ class FunctionAppUtilities(object):
                 properties=app_settings.properties
             )
 
-        # sync the scale controller for the Function App
-        if not cls._sync_function_triggers(function_params):
-            cls.log.error("Unable to sync triggers...")
+            # Sync the scale controller for the Function App.
+            # Not required for the dedicated plans.
+            cls._sync_function_triggers(function_params)
 
         cls.log.info('Finished publishing Function application')
 
     @classmethod
     def _sync_function_triggers(cls, function_params):
         cls.log.info('Sync Triggers...')
+        # This delay replicates behavior of Azure Functions Core tool
+        # Link to the github: https://bit.ly/2K5oXbS
+        time.sleep(5)
         session = local_session(Session)
         web_client = session.client('azure.mgmt.web.WebSiteManagementClient')
 
@@ -197,7 +206,7 @@ class FunctionAppUtilities(object):
                     function_params.function_app_resource_group_name,
                     function_params.function_app_name
                 )
-            except CloudError as e:
+            except (HttpOperationError, CloudError) as e:
                 # This appears to be a bug in the API
                 # Success can be either 200 or 204, which is
                 # unexpected and gets rethrown as a CloudError
@@ -213,4 +222,5 @@ class FunctionAppUtilities(object):
                 cls.log.info("Retrying in 5 seconds...")
                 time.sleep(5)
 
+        cls.log.error("Unable to sync triggers...")
         return False

@@ -17,6 +17,8 @@ import csv
 import json
 import os
 import tempfile
+import vcr
+from six.moves.urllib.request import urlopen
 from six import binary_type
 
 from .common import BaseTest, ACCOUNT_ID, Bag, TestConfig as Config
@@ -73,11 +75,24 @@ class ResolverTest(BaseTest):
         self.assertEqual(content, data)
         self.assertEqual(list(cache.state.keys()), [("uri-resolver", uri)])
 
+    def test_handle_content_encoding(self):
+        session_factory = self.replay_flight_data("test_s3_resolver")
+        cache = FakeCache()
+        resolver = URIResolver(session_factory, cache)
+        uri = "http://httpbin.org/gzip"
+        with vcr.use_cassette('tests/data/vcr_cassettes/test_resolver.yaml'):
+            response = urlopen(uri)
+            content = resolver.handle_response_encoding(response)
+            data = json.loads(content)
+            self.assertEqual(data['gzipped'], True)
+            self.assertEqual(response.headers['Content-Encoding'], 'gzip')
+
     def test_resolve_file(self):
         content = json.dumps({"universe": {"galaxy": {"system": "sun"}}})
         cache = FakeCache()
         resolver = URIResolver(None, cache)
-        with tempfile.NamedTemporaryFile(mode="w+", dir=os.getcwd()) as fh:
+        with tempfile.NamedTemporaryFile(mode="w+", dir=os.getcwd(), delete=False) as fh:
+            self.addCleanup(os.unlink, fh.name)
             fh.write(content)
             fh.flush()
             self.assertEqual(resolver.resolve("file:%s" % fh.name), content)
@@ -114,7 +129,7 @@ class UrlValueTest(BaseTest):
         with open("resolver_test.txt", "w") as out:
             for i in ["a", "b", "c", "d"]:
                 out.write("%s\n" % i)
-        with open("resolver_test.txt", "r") as out:
+        with open("resolver_test.txt", "rb") as out:
             values = self.get_values_from({"url": "letters.txt"}, out.read())
         os.remove("resolver_test.txt")
         self.assertEqual(values.get_values(), ["a", "b", "c", "d"])
@@ -123,7 +138,7 @@ class UrlValueTest(BaseTest):
         with open("test_expr.csv", "w") as out:
             writer = csv.writer(out)
             writer.writerows([range(5) for r in range(5)])
-        with open("test_expr.csv", "r") as out:
+        with open("test_expr.csv", "rb") as out:
             values = self.get_values_from(
                 {"url": "sun.csv", "expr": "[*][2]"}, out.read()
             )
@@ -135,7 +150,7 @@ class UrlValueTest(BaseTest):
             writer = csv.writer(out)
             writer.writerow(["aa", "bb", "cc", "dd", "ee"])  # header row
             writer.writerows([range(5) for r in range(5)])
-        with open("test_dict.csv", "r") as out:
+        with open("test_dict.csv", "rb") as out:
             values = self.get_values_from(
                 {"url": "sun.csv", "expr": "bb[1]", "format": "csv2dict"}, out.read()
             )
@@ -146,7 +161,7 @@ class UrlValueTest(BaseTest):
         with open("test_column.csv", "w") as out:
             writer = csv.writer(out)
             writer.writerows([range(5) for r in range(5)])
-        with open("test_column.csv", "r") as out:
+        with open("test_column.csv", "rb") as out:
             values = self.get_values_from({"url": "sun.csv", "expr": 1}, out.read())
         os.remove("test_column.csv")
         self.assertEqual(values.get_values(), ["1", "1", "1", "1", "1"])
@@ -155,7 +170,7 @@ class UrlValueTest(BaseTest):
         with open("test_raw.csv", "w") as out:
             writer = csv.writer(out)
             writer.writerows([range(3, 4) for r in range(5)])
-        with open("test_raw.csv", "r") as out:
+        with open("test_raw.csv", "rb") as out:
             values = self.get_values_from({"url": "sun.csv"}, out.read())
         os.remove("test_raw.csv")
         self.assertEqual(values.get_values(), [["3"], ["3"], ["3"], ["3"], ["3"]])

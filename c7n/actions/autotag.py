@@ -53,9 +53,10 @@ class AutoTagUser(EventAction):
     attempting to tag it.
 
     References
-     - AWS Config (see REQUIRED_TAGS caveat) - http://goo.gl/oDUXPY
-     - CloudTrail User - http://goo.gl/XQhIG6
-    """
+
+     CloudTrail User
+     https://docs.aws.amazon.com/awscloudtrail/latest/userguide/cloudtrail-event-reference-user-identity.html
+    """ # NOQA
 
     schema_alias = True
     schema = utils.type_schema(
@@ -96,14 +97,14 @@ class AutoTagUser(EventAction):
             return
         event = event['detail']
         utype = event['userIdentity']['type']
-        if utype not in self.data.get('user-type', ['AssumedRole', 'IAMUser']):
+        if utype not in self.data.get('user-type', ['AssumedRole', 'IAMUser', 'FederatedUser']):
             return
 
         user = None
         if utype == "IAMUser":
             user = event['userIdentity']['userName']
             principal_id_value = event['userIdentity'].get('principalId', '')
-        elif utype == "AssumedRole":
+        elif utype == "AssumedRole" or utype == "FederatedUser":
             user = event['userIdentity']['arn']
             prefix, user = user.rsplit('/', 1)
             principal_id_value = event['userIdentity'].get('principalId', '').split(':')[0]

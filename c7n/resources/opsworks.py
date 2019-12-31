@@ -17,7 +17,7 @@ from botocore.exceptions import ClientError
 
 from c7n.actions import BaseAction
 from c7n.manager import resources
-from c7n.query import QueryResourceManager
+from c7n.query import QueryResourceManager, TypeInfo
 from c7n.utils import local_session, type_schema
 from c7n import utils
 
@@ -30,7 +30,8 @@ class StateTransitionFilter(object):
     they are valid for. Separate from ec2 class as uses ['status']
     instead of ['State']['Name'].
 
-    For more details see http://goo.gl/TZH9Q5
+    For more details see
+    https://docs.aws.amazon.com/AWSEC2/latest/UserGuide/ec2-instance-lifecycle.html
     """
     valid_origin_states = ()
 
@@ -47,7 +48,7 @@ class StateTransitionFilter(object):
 @resources.register('opswork-stack')
 class OpsworkStack(QueryResourceManager):
 
-    class resource_type(object):
+    class resource_type(TypeInfo):
         service = 'opsworks'
         enum_spec = ('describe_stacks', 'Stacks', None)
         filter_name = 'StackIds'
@@ -56,6 +57,7 @@ class OpsworkStack(QueryResourceManager):
         name = 'Name'
         date = 'CreatedAt'
         dimension = "StackId"
+        arn = "Arn"
 
 
 @OpsworkStack.action_registry.register('delete')
@@ -159,14 +161,14 @@ class StopStack(BaseAction):
 @resources.register('opswork-cm')
 class OpsworksCM(QueryResourceManager):
 
-    class resource_type(object):
+    class resource_type(TypeInfo):
         service = "opsworkscm"
         enum_spec = ('describe_servers', 'Servers', None)
         filter_name = 'ServerName'
         filter_type = 'scalar'
         name = id = 'ServerName'
         date = 'CreatedAt'
-        dimension = None
+        arn = "ServerArn"
 
 
 @OpsworksCM.action_registry.register('delete')

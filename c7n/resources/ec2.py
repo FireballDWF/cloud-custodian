@@ -29,20 +29,22 @@ import jmespath
 from c7n.actions import (
     ActionRegistry, BaseAction, ModifyVpcSecurityGroupsAction
 )
-from c7n.actions.securityhub import PostFinding
+
 from c7n.exceptions import PolicyValidationError
 from c7n.filters import (
-    FilterRegistry, AgeFilter, ValueFilter, Filter, OPERATORS, DefaultVpcBase
+    FilterRegistry, AgeFilter, ValueFilter, Filter, DefaultVpcBase
 )
 from c7n.filters.offhours import OffHour, OnHour
 import c7n.filters.vpc as net_filters
 
 from c7n.manager import resources
-from c7n import query
-
-from c7n import utils
+from c7n import query, utils
 from c7n.utils import type_schema, filter_empty
 
+from c7n.resources.iam import CheckPermissions
+from c7n.resources.securityhub import PostFinding
+
+RE_ERROR_INSTANCE_ID = re.compile("'(?P<instance_id>i-.*?)'")
 
 filters = FilterRegistry('ec2.filters')
 actions = ActionRegistry('ec2.actions')
@@ -51,11 +53,10 @@ actions = ActionRegistry('ec2.actions')
 @resources.register('ec2')
 class EC2(query.QueryResourceManager):
 
-    class resource_type(object):
+    class resource_type(query.TypeInfo):
         service = 'ec2'
-        type = 'instance'
+        arn_type = 'instance'
         enum_spec = ('describe_instances', 'Reservations[].Instances[]', None)
-        detail_spec = None
         id = 'InstanceId'
         filter_name = 'InstanceIds'
         filter_type = 'list'
@@ -63,7 +64,6 @@ class EC2(query.QueryResourceManager):
         date = 'LaunchTime'
         dimension = 'InstanceId'
         config_type = "AWS::EC2::Instance"
-        shape = "Instance"
 
         default_report_fields = (
             'CustodianDate',
@@ -125,7 +125,8 @@ class DescribeEC2(query.DescribeSource):
         various resources, it may also silently fail to do so unless a tag
         is used as a filter.
 
-        See footnote on http://goo.gl/YozD9Q for official documentation.
+        See footnote on for official documentation.
+        https://docs.aws.amazon.com/AWSEC2/latest/UserGuide/Using_Tags.html#Using_Tags_CLI
 
         Apriori we may be using custodian to ensure tags (including
         name), so there isn't a good default to ensure that we will
@@ -188,7 +189,26 @@ class VpcFilter(net_filters.VpcFilter):
     RelatedIdsExpression = "VpcId"
 
 
-filters.register('network-location', net_filters.NetworkLocation)
+@filters.register('check-permissions')
+class ComputePermissions(CheckPermissions):
+
+    def get_iam_arns(self, resources):
+        profile_arn_map = {
+            r['IamInstanceProfile']['Arn']: r['IamInstanceProfile']['Id']
+            for r in resources if 'IamInstanceProfile' in r}
+
+        # py2 compat on dict ordering
+        profile_arns = list(profile_arn_map.items())
+        profile_role_map = {
+            arn: profile['Roles'][0]['Arn']
+            for arn, profile in zip(
+                [p[0] for p in profile_arns],
+                self.manager.get_resource_manager(
+                    'iam-profile').get_resources(
+                        [p[1] for p in profile_arns]))}
+        return [
+            profile_role_map.get(r.get('IamInstanceProfile', {}).get('Arn'))
+            for r in resources]
 
 
 @filters.register('state-age')
@@ -205,7 +225,7 @@ class StateTransitionAge(AgeFilter):
                 op: ge
                 days: 7
     """
-    RE_PARSE_AGE = re.compile("\(.*?\)")
+    RE_PARSE_AGE = re.compile(r"\(.*?\)")
 
     # this filter doesn't use date_attribute, but needs to define it
     # to pass AgeFilter's validate method
@@ -213,7 +233,7 @@ class StateTransitionAge(AgeFilter):
 
     schema = type_schema(
         'state-age',
-        op={'type': 'string', 'enum': list(OPERATORS.keys())},
+        op={'$ref': '#/definitions/filters_common/comparison_operators'},
         days={'type': 'number'})
 
     def get_resource_date(self, i):
@@ -233,7 +253,9 @@ class StateTransitionFilter(object):
     filtering elements (filters or actions) to the instances states
     they are valid for.
 
-    For more details see http://goo.gl/TZH9Q5
+    For more details see
+     https://docs.aws.amazon.com/AWSEC2/latest/UserGuide/ec2-instance-lifecycle.html
+
     """
     valid_origin_states = ()
 
@@ -270,6 +292,7 @@ class AttachedVolume(ValueFilter):
         'ebs', rinherit=ValueFilter.schema,
         **{'operator': {'enum': ['and', 'or']},
            'skip-devices': {'type': 'array', 'items': {'type': 'string'}}})
+    schema_alias = False
 
     def get_permissions(self):
         return self.manager.get_resource_manager('ebs').get_permissions()
@@ -410,7 +433,7 @@ class ImageAge(AgeFilter, InstanceImageBase):
 
     schema = type_schema(
         'image-age',
-        op={'type': 'string', 'enum': list(OPERATORS.keys())},
+        op={'$ref': '#/definitions/filters_common/comparison_operators'},
         days={'type': 'number'})
 
     def get_permissions(self):
@@ -432,6 +455,7 @@ class ImageAge(AgeFilter, InstanceImageBase):
 class InstanceImage(ValueFilter, InstanceImageBase):
 
     schema = type_schema('image', rinherit=ValueFilter.schema)
+    schema_alias = False
 
     def get_permissions(self):
         return self.manager.get_resource_manager('ami').get_permissions()
@@ -507,6 +531,19 @@ class InstanceOffHour(OffHour, StateTransitionFilter):
     def process(self, resources, event=None):
         return super(InstanceOffHour, self).process(
             self.filter_instance_state(resources))
+
+
+@filters.register('network-location')
+class EC2NetworkLocation(net_filters.NetworkLocation, StateTransitionFilter):
+
+    valid_origin_states = ('pending', 'running', 'shutting-down', 'stopping',
+                           'stopped')
+
+    def process(self, resources, event=None):
+        resources = self.filter_instance_state(resources)
+        if not resources:
+            return []
+        return super(EC2NetworkLocation, self).process(resources)
 
 
 @filters.register('onhour')
@@ -608,7 +645,7 @@ class UpTimeFilter(AgeFilter):
 
     schema = type_schema(
         'instance-uptime',
-        op={'type': 'string', 'enum': list(OPERATORS.keys())},
+        op={'$ref': '#/definitions/filters_common/comparison_operators'},
         days={'type': 'number'})
 
 
@@ -634,7 +671,7 @@ class InstanceAgeFilter(AgeFilter):
 
     schema = type_schema(
         'instance-age',
-        op={'type': 'string', 'enum': list(OPERATORS.keys())},
+        op={'$ref': '#/definitions/filters_common/comparison_operators'},
         days={'type': 'number'},
         hours={'type': 'number'},
         minutes={'type': 'number'})
@@ -695,6 +732,7 @@ class UserData(ValueFilter):
     """
 
     schema = type_schema('user-data', rinherit=ValueFilter.schema)
+    schema_alias = False
     batch_size = 50
     annotation = 'c7n:user-data'
     permissions = ('ec2:DescribeInstanceAttribute',)
@@ -809,18 +847,73 @@ class SingletonFilter(Filter, StateTransitionFilter):
         return False
 
 
+@EC2.filter_registry.register('ssm')
+class SsmStatus(ValueFilter):
+    """Filter ec2 instances by their ssm status information.
+
+    :Example:
+
+    Find ubuntu 18.04 instances are active with ssm.
+
+    .. code-block:: yaml
+
+        policies:
+          - name: ec2-ssm-check
+            resource: ec2
+            filters:
+              - type: ssm
+                key: PingStatus
+                value: Online
+              - type: ssm
+                key: PlatformName
+                value: Ubuntu
+              - type: ssm
+                key: PlatformVersion
+                value: 18.04
+    """
+    schema = type_schema('ssm', rinherit=ValueFilter.schema)
+    schema_alias = False
+    permissions = ('ssm:DescribeInstanceInformation',)
+    annotation = 'c7n:SsmState'
+
+    def process(self, resources, event=None):
+        client = utils.local_session(self.manager.session_factory).client('ssm')
+        results = []
+        for resource_set in utils.chunks(
+                [r for r in resources if self.annotation not in r], 50):
+            self.process_resource_set(client, resource_set)
+        for r in resources:
+            if self.match(r[self.annotation]):
+                results.append(r)
+        return results
+
+    def process_resource_set(self, client, resources):
+        instance_ids = [i['InstanceId'] for i in resources]
+        info_map = {
+            info['InstanceId']: info for info in
+            client.describe_instance_information(
+                Filters=[{'Key': 'InstanceIds', 'Values': instance_ids}]).get(
+                    'InstanceInformationList', [])}
+        for r in resources:
+            r[self.annotation] = info_map.get(r['InstanceId'], {})
+
+
 @EC2.action_registry.register("post-finding")
 class InstanceFinding(PostFinding):
     def format_resource(self, r):
+        ip_addresses = jmespath.search(
+            "NetworkInterfaces[].PrivateIpAddresses[].PrivateIpAddress", r)
+
+        # limit to max 10 ip addresses, per security hub service limits
+        ip_addresses = ip_addresses and ip_addresses[:10] or ip_addresses
         details = {
             "Type": r["InstanceType"],
             "ImageId": r["ImageId"],
-            "IpV4Addresses": jmespath.search(
-                "NetworkInterfaces[].PrivateIpAddresses[].PrivateIpAddress", r
-            ),
+            "IpV4Addresses": ip_addresses,
             "KeyName": r.get("KeyName"),
-            "LaunchedAt": r["LaunchTime"].isoformat(),
+            "LaunchedAt": r["LaunchTime"].isoformat()
         }
+
         if "VpcId" in r:
             details["VpcId"] = r["VpcId"]
         if "SubnetId" in r:
@@ -830,7 +923,8 @@ class InstanceFinding(PostFinding):
 
         instance = {
             "Type": "AwsEc2Instance",
-            "Id": "arn:aws:ec2:{}:{}:instance/{}".format(
+            "Id": "arn:{}:ec2:{}:{}:instance/{}".format(
+                utils.REGION_PARTITION_MAP.get(self.manager.config.region, 'aws'),
                 self.manager.config.region,
                 self.manager.config.account_id,
                 r["InstanceId"]),
@@ -893,8 +987,7 @@ class Start(BaseAction, StateTransitionFilter):
         if failures:
             fail_count = sum(map(len, failures.values()))
             msg = "Could not start %d of %d instances %s" % (
-                fail_count, len(instances),
-                utils.dumps(failures))
+                fail_count, len(instances), utils.dumps(failures))
             self.log.warning(msg)
             raise RuntimeError(msg)
 
@@ -904,12 +997,29 @@ class Start(BaseAction, StateTransitionFilter):
                      'Client.RequestLimitExceeded'),
         retry = utils.get_retry(retryable, max_attempts=5)
         instance_ids = [i['InstanceId'] for i in instances]
-        try:
-            retry(client.start_instances, InstanceIds=instance_ids)
-        except ClientError as e:
-            if e.response['Error']['Code'] in retryable:
-                return True
-            raise
+        while instance_ids:
+            try:
+                retry(client.start_instances, InstanceIds=instance_ids)
+                break
+            except ClientError as e:
+                if e.response['Error']['Code'] in retryable:
+                    # we maxed out on our retries
+                    return True
+                elif e.response['Error']['Code'] == 'IncorrectInstanceState':
+                    instance_ids.remove(extract_instance_id(e))
+                else:
+                    raise
+
+
+def extract_instance_id(state_error):
+    "Extract an instance id from an error"
+    instance_id = None
+    match = RE_ERROR_INSTANCE_ID.search(str(state_error))
+    if match:
+        instance_id = match.groupdict().get('instance_id')
+    if match is None or instance_id is None:
+        raise ValueError("Could not extract instance id from error: %s" % state_error)
+    return instance_id
 
 
 @actions.register('resize')
@@ -1048,17 +1158,12 @@ class Stop(BaseAction, StateTransitionFilter):
         return instances
 
     def _run_instances_op(self, op, instance_ids):
-        while True:
+        while instance_ids:
             try:
                 return self.manager.retry(op, InstanceIds=instance_ids)
             except ClientError as e:
                 if e.response['Error']['Code'] == 'IncorrectInstanceState':
-                    msg = e.response['Error']['Message']
-                    e_instance_id = msg[msg.find("'") + 1:msg.rfind("'")]
-                    instance_ids.remove(e_instance_id)
-                    if not instance_ids:
-                        return
-                    continue
+                    instance_ids.remove(extract_instance_id(e))
                 raise
 
 
@@ -1206,78 +1311,78 @@ class Snapshot(BaseAction):
         policies:
           - name: ec2-snapshots
             resource: ec2
-          actions:
-            - type: snapshot
-              copy-tags:
-                - Name
+            actions:
+              - type: snapshot
+                copy-tags:
+                  - Name
     """
 
     schema = type_schema(
         'snapshot',
-        **{'copy-tags': {'type': 'array', 'items': {'type': 'string'}}})
+        **{'copy-tags': {'type': 'array', 'items': {'type': 'string'}},
+           'copy-volume-tags': {'type': 'boolean'},
+           'exclude-boot': {'type': 'boolean', 'default': False}})
     permissions = ('ec2:CreateSnapshot', 'ec2:CreateTags',)
 
+    def validate(self):
+        if self.data.get('copy-tags') and 'copy-volume-tags' in self.data:
+            raise PolicyValidationError(
+                "Can specify copy-tags or copy-volume-tags, not both")
+
     def process(self, resources):
-        client = utils.local_session(
-            self.manager.session_factory).client('ec2')
+        client = utils.local_session(self.manager.session_factory).client('ec2')
+        err = None
         with self.executor_factory(max_workers=2) as w:
-            futures = []
+            futures = {}
             for resource in resources:
-                futures.append(w.submit(
-                    self.process_volume_set, client, resource))
+                futures[w.submit(
+                    self.process_volume_set, client, resource)] = resource
             for f in as_completed(futures):
                 if f.exception():
-                    raise f.exception()
+                    err = f.exception()
+                    resource = futures[f]
                     self.log.error(
-                        "Exception creating snapshot set \n %s" % (
-                            f.exception()))
+                        "Exception creating snapshot set instance:%s \n %s" % (
+                            resource['InstanceId'], err))
+        if err:
+            raise err
 
     def process_volume_set(self, client, resource):
-        for block_device in resource['BlockDeviceMappings']:
-            if 'Ebs' not in block_device:
-                continue
-            volume_id = block_device['Ebs']['VolumeId']
-            description = "Automated,Backup,%s,%s" % (
-                resource['InstanceId'], volume_id)
-            tags = self.get_snapshot_tags(resource, block_device)
-            try:
-                self.manager.retry(
-                    client.create_snapshot,
-                    DryRun=self.manager.config.dryrun,
-                    VolumeId=volume_id,
-                    Description=description,
-                    TagSpecifications=[{
-                        'ResourceType': 'snapshot',
-                        'Tags': tags}])
-            except ClientError as e:
-                if e.response['Error']['Code'] == 'IncorrectState':
-                    self.log.warning(
-                        "action:%s volume:%s is incorrect state" % (
-                            self.__class__.__name__.lower(),
-                            volume_id))
-                    continue
+        params = dict(
+            InstanceSpecification={
+                'ExcludeBootVolume': self.data.get('exclude-boot', False),
+                'InstanceId': resource['InstanceId']})
+        if 'copy-tags' in self.data:
+            params['TagSpecifications'] = [{
+                'ResourceType': 'snapshot',
+                'Tags': self.get_snapshot_tags(resource)}]
+        elif self.data.get('copy-volume-tags', True):
+            params['CopyTagsFromSource'] = 'volume'
+
+        try:
+            result = self.manager.retry(client.create_snapshots, **params)
+            resource['c7n:snapshots'] = [
+                s['SnapshotId'] for s in result['Snapshots']]
+        except ClientError as e:
+            err_code = e.response['Error']['Code']
+            if err_code not in (
+                    'InvalidInstanceId.NotFound',
+                    'ConcurrentSnapshotLimitExceeded',
+                    'IncorrectState'):
                 raise
+            self.log.warning(
+                "action:snapshot instance:%s error:%s",
+                resource['InstanceId'], err_code)
 
-    def get_snapshot_tags(self, resource, block_device):
+    def get_snapshot_tags(self, resource):
         tags = [
-            {'Key': 'Name', 'Value': block_device['Ebs']['VolumeId']},
-            {'Key': 'InstanceId', 'Value': resource['InstanceId']},
-            {'Key': 'DeviceName', 'Value': block_device['DeviceName']},
             {'Key': 'custodian_snapshot', 'Value': ''}]
-
         copy_keys = self.data.get('copy-tags', [])
         copy_tags = []
         if copy_keys:
             for t in resource.get('Tags', []):
                 if t['Key'] in copy_keys:
                     copy_tags.append(t)
-
-            if len(copy_tags) + len(tags) > 40:
-                self.log.warning(
-                    "action:%s volume:%s too many tags to copy" % (
-                        self.__class__.__name__.lower(),
-                        block_device['Ebs']['VolumeId']))
-                copy_tags = []
             tags.extend(copy_tags)
         return tags
 
@@ -1331,8 +1436,8 @@ class AutorecoverAlarm(BaseAction, StateTransitionFilter):
             resource: ec2
             filters:
               - singleton
-          actions:
-            - autorecover-alarm
+            actions:
+              - autorecover-alarm
 
     https://docs.aws.amazon.com/AWSEC2/latest/UserGuide/ec2-instance-recover.html
     """
@@ -1360,7 +1465,9 @@ class AutorecoverAlarm(BaseAction, StateTransitionFilter):
                 AlarmDescription='Auto Recover {}'.format(i['InstanceId']),
                 ActionsEnabled=True,
                 AlarmActions=[
-                    'arn:aws:automate:{}:ec2:recover'.format(
+                    'arn:{}:automate:{}:ec2:recover'.format(
+                        utils.REGION_PARTITION_MAP.get(
+                            self.manager.config.region, 'aws'),
                         i['Placement']['AvailabilityZone'][:-1])
                 ],
                 MetricName='StatusCheckFailed_System',
@@ -1464,19 +1571,19 @@ class PropagateSpotTags(BaseAction):
 
     :Example:
 
-    .. code-block: yaml
+    .. code-block:: yaml
 
         policies:
           - name: ec2-spot-instances
             resource: ec2
-          filters:
-            - State.Name: pending
-            - instanceLifecycle: spot
-          actions:
-            - type: propagate-spot-tags
-              only_tags:
-                - Name
-                - BillingTag
+            filters:
+              - State.Name: pending
+              - instanceLifecycle: spot
+            actions:
+              - type: propagate-spot-tags
+                only_tags:
+                  - Name
+                  - BillingTag
     """
 
     schema = type_schema(
@@ -1674,6 +1781,7 @@ class InstanceAttribute(ValueFilter):
         rinherit=ValueFilter.schema,
         attribute={'enum': valid_attrs},
         required=('attribute',))
+    schema_alias = False
 
     def get_permissions(self):
         return ('ec2:DescribeInstanceAttribute',)
@@ -1699,3 +1807,110 @@ class InstanceAttribute(ValueFilter):
             keys.remove('InstanceId')
             resource['c7n:attribute-%s' % attribute] = fetched_attribute[
                 keys[0]]
+
+
+@resources.register('launch-template-version')
+class LaunchTemplate(query.QueryResourceManager):
+
+    class resource_type(query.TypeInfo):
+        id = 'LaunchTemplateId'
+        name = 'LaunchTemplateName'
+        service = 'ec2'
+        date = 'CreateTime'
+        enum_spec = (
+            'describe_launch_templates', 'LaunchTemplates', None)
+        filter_name = 'LaunchTemplateIds'
+        filter_type = 'list'
+        arn_type = "launch-template"
+
+    def augment(self, resources):
+        client = utils.local_session(
+            self.session_factory).client('ec2')
+        template_versions = []
+        for r in resources:
+            template_versions.extend(
+                client.describe_launch_template_versions(
+                    LaunchTemplateId=r['LaunchTemplateId']).get(
+                        'LaunchTemplateVersions', ()))
+        return template_versions
+
+    def get_resources(self, rids, cache=True):
+        # Launch template versions have a compound primary key
+        #
+        # Support one of four forms of resource ids:
+        #
+        #  - array of launch template ids
+        #  - array of tuples (launch template id, version id)
+        #  - array of dicts (with LaunchTemplateId and VersionNumber)
+        #  - array of dicts (with LaunchTemplateId and LatestVersionNumber)
+        #
+        # If an alias version is given $Latest, $Default, the alias will be
+        # preserved as an annotation on the returned object 'c7n:VersionAlias'
+        if not rids:
+            return []
+
+        t_versions = {}
+        if isinstance(rids[0], tuple):
+            for tid, tversion in rids:
+                t_versions.setdefault(tid, []).append(tversion)
+        elif isinstance(rids[0], dict):
+            for tinfo in rids:
+                t_versions.setdefault(
+                    tinfo['LaunchTemplateId'], []).append(
+                        tinfo.get('VersionNumber', tinfo.get('LatestVersionNumber')))
+        elif isinstance(rids[0], six.string_types):
+            for tid in rids:
+                t_versions[tid] = []
+
+        client = utils.local_session(self.session_factory).client('ec2')
+
+        results = []
+        # We may end up fetching duplicates on $Latest and $Version
+        for tid, tversions in t_versions.items():
+            try:
+                ltv = client.describe_launch_template_versions(
+                    LaunchTemplateId=tid, Versions=tversions).get(
+                        'LaunchTemplateVersions')
+            except ClientError as e:
+                if e.response['Error']['Code'] == "InvalidLaunchTemplateId.NotFound":
+                    continue
+                if e.response['Error']['Code'] == "InvalidLaunchTemplateId.VersionNotFound":
+                    continue
+                raise
+            if not tversions:
+                tversions = [str(t['VersionNumber']) for t in ltv]
+            for tversion, t in zip(tversions, ltv):
+                if not tversion.isdigit():
+                    t['c7n:VersionAlias'] = tversion
+                results.append(t)
+        return results
+
+    def get_asg_templates(self, asgs):
+        templates = {}
+        for a in asgs:
+            t = None
+            if 'LaunchTemplate' in a:
+                t = a['LaunchTemplate']
+            elif 'MixedInstancesPolicy' in a:
+                t = a['MixedInstancesPolicy'][
+                    'LaunchTemplate']['LaunchTemplateSpecification']
+            if t is None:
+                continue
+            templates.setdefault(
+                (t['LaunchTemplateId'],
+                 t['Version']), []).append(a['AutoScalingGroupName'])
+        return templates
+
+
+@resources.register('ec2-reserved')
+class ReservedInstance(query.QueryResourceManager):
+
+    class resource_type(query.TypeInfo):
+        service = 'ec2'
+        name = id = 'ReservedInstancesId'
+        date = 'Start'
+        enum_spec = (
+            'describe_reserved_instances', 'ReservedInstances', None)
+        filter_name = 'ReservedInstancesIds'
+        filter_type = 'list'
+        arn_type = "reserved-instances"

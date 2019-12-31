@@ -15,6 +15,7 @@
 from io import open
 from os import path
 from setuptools import setup, find_packages
+import sys
 
 # read the contents of your README file
 this_directory = path.abspath(path.dirname(__file__))
@@ -24,20 +25,21 @@ if path.exists(readme):
     with open(readme, encoding='utf-8') as f:
         long_description = f.read()
 
+# azure-functions are required if running in Azure Functions
+# mode which is not supported for Python 2.7
+extra_dependencies = ["azure-functions"] if sys.version_info[0] >= 3 else []
+
 setup(
     name="c7n_azure",
-    version='0.4',
+    version='0.6.2',
     description="Cloud Custodian - Azure Support",
     long_description=long_description,
     long_description_content_type='text/markdown',
-    include_package_data=True,
     classifiers=[
         "Topic :: System :: Systems Administration",
         "Topic :: System :: Distributed Computing"
     ],
-    url="https://github.com/capitalone/cloud-custodian",
-    maintainer="Kapil Thangavelu",
-    maintainer_email="kapil.foss@gmail.com",
+    url="https://github.com/cloud-custodian/cloud-custodian",
     license="Apache-2.0",
     packages=find_packages(),
     entry_points={
@@ -45,40 +47,63 @@ setup(
             'azure = c7n_azure.entry:initialize_azure']
     },
     install_requires=["azure-mgmt-authorization",
+                      "azure-mgmt-apimanagement",
                       "azure-mgmt-applicationinsights",
                       "azure-mgmt-batch",
                       "azure-mgmt-cognitiveservices",
                       "azure-mgmt-cosmosdb",
+                      "azure-mgmt-costmanagement",
+                      "azure-mgmt-containerinstance",
                       "azure-mgmt-compute",
                       "azure-mgmt-cdn",
                       "azure-mgmt-containerregistry",
                       "azure-mgmt-containerservice",
+                      "azure-mgmt-databricks",
                       "azure-mgmt-datalake-store",
                       "azure-mgmt-datafactory",
+                      "azure-mgmt-dns",
+                      "azure-mgmt-eventgrid",
+                      "azure-mgmt-eventhub",
+                      "azure-mgmt-hdinsight",
                       "azure-mgmt-iothub",
-                      "azure-mgmt-keyvault",
-                      "azure-mgmt-network",
+                      "azure-mgmt-keyvault==1.1.0",
+                      "azure-mgmt-managementgroups",
+                      "azure-mgmt-network>=4.0.0",
                       "azure-mgmt-redis",
-                      "azure-mgmt-resource",
+                      "azure-mgmt-resourcegraph",
+                      "azure-mgmt-resource~=4.0.0",
+                      "azure-mgmt-rdbms",
+                      "azure-mgmt-search",
                       "azure-mgmt-sql",
                       "azure-mgmt-storage",
+                      "azure-mgmt-subscription",
                       "azure-mgmt-web",
                       "azure-mgmt-monitor",
                       "azure-mgmt-policyinsights",
-                      "azure-mgmt-subscription",
-                      "azure-mgmt-eventgrid==2.0.0rc2",  # RC2 supports AdvancedFilters
+                      "azure-mgmt-logic",
+                      "azure-cosmos",
                       "azure-graphrbac",
-                      "azure-storage-blob",
-                      "azure-storage-queue",
+                      "azure-keyvault==1.1.0",
+                      "azure-storage-blob~=2.1",
+                      # azure-cosmosdb-table has incompatible dependency ~=1.1
+                      # Remove this when fixed:
+                      # https://github.com/Azure/azure-cosmos-table-python/issues/39
+                      "azure-storage-common~=2.0",
+                      "azure-storage-queue~=2.1",
+                      "azure-storage-file~=2.1",
+                      "azure-cosmosdb-table",
+                      "applicationinsights",
+                      "apscheduler",
                       "distlib",
+                      "jsonpickle",
                       "requests",
                       "PyJWT",
-                      "c7n",
-                      "requests",
-                      "azure-cli-core<=2.0.40",
-                      "adal~=1.0.0",
+                      "c7n>=0.8.45.1",
+                      "azure-cli-core",
+                      "adal",
                       "backports.functools_lru_cache",
-                      "futures>=3.1.1"],
+                      "futures>=3.1.1",
+                      "netaddr"] + extra_dependencies,
     package_data={str(''): [str('function_binding_resources/bin/*.dll'),
                             str('function_binding_resources/*.csproj'),
                             str('function_binding_resources/bin/*.json')]}

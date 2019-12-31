@@ -11,48 +11,70 @@ Getting Started
 Install Cloud Custodian and Azure Plugin
 ----------------------------------------
 
-The Azure provider must be installed as a separate package in addition to c7n.
+Cloud Custodian is a Python application and supports Python 2 and 3 on Linux and Windows.
+We recommend using Python 3.6 or higher.
 
-.. code-block:: bash
+The Azure provider is an additional package which is installed in addition to c7n.
 
-  $ virtualenv custodian
+Install latest from the repository to virtual Python environment
+""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""
+
+Linux and Mac OS
++++++++++++++++++++++++++++
+
+To install Cloud Custodian, run::
+
+  $ python3 -m venv custodian
   $ source custodian/bin/activate
-  (custodian) $ pip install c7n
-  (custodian) $ pip install c7n_azure
+  $ git clone https://github.com/cloud-custodian/cloud-custodian.git
+  $ cd cloud-custodian
+  $ pip install -e .
+  $ pip install -e tools/c7n_azure
 
 
-If you prefer to install the latest from source control you can do so as follows:
+Windows (CMD/PowerShell)
++++++++++++++++++++++++++++
 
-.. code-block:: bash
+To install Cloud Custodian, run::
 
-  $ git clone https://github.com/capitalone/cloud-custodian.git
-  $ virtualenv custodian
-  $ source custodian/bin/activate
-  (custodian) $ pip install ./cloud-custodian
-  (custodian) $ pip install ./cloud-custodian/tools/c7n_azure
+  $ python3 -m venv custodian
+  $ ./custodian/Scripts/activate
+  $ git clone https://github.com/cloud-custodian/cloud-custodian.git
+  $ cd cloud-custodian
+  $ pip install -e .
+  $ pip install -e tools/c7n_azure
+
 
 .. _azure_write-policy:
 
 Write your first policy
 -----------------------
 
-A policy specifies the following items:
+Cloud Custodian is a stateless rules engine that filters Azure resources and takes actions on based on policies that you define.
+
+Cloud Custodian policies are expressed in YAML and include the following:
 
 * The type of resource to run the policy against
 * Filters to narrow down the set of resources
 * Actions to take on the filtered set of resources
 
-For this tutorial we will add a tag to all virtual machines with the name "Hello" and the value "World".
+Our first policy filters to a VM of a specific name, then adds the tag ``Hello: World``.
 
-Create a file named ``custodian.yml`` with this content:
+Create a file named ``custodian.yml`` with the following content. Update ``my_vm_name`` to match an existing VM.
+
+*Note: Some text editors (VSCode) inject invalid whitespace characters when copy/pasting YAML from a browser*
 
 .. code-block:: yaml
 
     policies:
         - name: my-first-policy
           description: |
-            Adds a tag to all virtual machines
+            Adds a tag to a virtual machines
           resource: azure.vm
+          filters:
+            - type: value
+              key: name
+              value: my_vm_name
           actions:
            - type: tag
              tag: Hello
@@ -63,21 +85,73 @@ Create a file named ``custodian.yml`` with this content:
 Run your policy
 ---------------
 
-First, choose one of the supported authentication mechanisms and either log in to Azure CLI or set
+**Choose one of the supported authentication mechanisms**, and either log in to Azure CLI or set
 environment variables as documented in :ref:`azure_authentication`.
 
 .. code-block:: bash
 
     custodian run --output-dir=. custodian.yml
 
-If successful, you should see output similar to the following on the command line::
+If successful, you should see output like the following on the command line::
 
     2016-12-20 08:35:06,133: custodian.policy:INFO Running policy my-first-policy resource: azure.vm
-    2016-12-20 08:35:07,514: custodian.policy:INFO policy: my-first-policy resource:ec2 has count:1 time:1.38
+    2016-12-20 08:35:07,514: custodian.policy:INFO policy: my-first-policy resource:azure.vm has count:1 time:1.38
     2016-12-20 08:35:08,188: custodian.policy:INFO policy: my-first-policy action: tag: 1 execution_time: 0.67
 
 
-You should also find a new ``my-first-policy`` directory with a log and other
-files (subsequent runs will append to the log by default rather than
-overwriting it).
+You should also find a new ``my-first-policy`` directory with a log and a ``resources.json`` file.
 
+See :ref:`filters` for more information on the features of the Value filter used in this sample.
+
+.. _monitor-azure-cc:
+
+(Optional) Run your policy with Azure Monitoring
+""""""""""""""""""""""""""""""""""""""""""""""""
+
+Cloud Custodian policies can emit logs and metrics to Application Insights when the policy executes.
+Please refer to the :ref:`azure_monitoring` section for further details.
+
+.. _azure_view_policy_reults:
+
+View policy results
+-------------------
+
+The ``resources.json`` file shows you the raw data that results from your policy after filtering.  This file can help you understand the
+fields available for your resources while developing your policy.
+
+Custodian Report
+"""""""""""""""""""""
+Custodian has a report feature that allows the ``resources.json`` file to be viewed more concisely. 
+By default, this will output data in a CSV format, but report also provides other output formats such as ``grid`` that are more digestable.
+
+When run, the result will look like this::
+
+    +------------+------------+-----------------+-------------------------------------+
+    | name       | location   | resourceGroup   | properties.hardwareProfile.vmSize   |
+    +============+============+=================+=====================================+
+    | my_vm_name | westus     | my_vm_rg        | Standard_D2_v2                      |
+    +------------+------------+-----------------+-------------------------------------+
+
+The fields produced by ``custodian report`` vary by resource (i.e. properties.hardwareProfile.vmSize); however, you can add additional fields to your report 
+by using the ``--field`` parameter. For example, if you want to see a list of tags on this resource:
+
+.. code-block:: bash
+
+    custodian report --output-dir=. --format grid --field tags=tags custodian.yml
+
+Result::
+
+    +------------+------------+-----------------+-------------------------------------+----------------------------+
+    | name       | location   | resourceGroup   | properties.hardwareProfile.vmSize   | tagHeader                  |
+    +============+============+=================+=====================================+============================+
+    | my_vm_name | westus     | my_vm_rg        | Standard_D2_v2                      | {'custodian-tagged': True} |
+    +------------+------------+-----------------+-------------------------------------+----------------------------+
+
+The ``field`` parameter has the format ``--field header=field`` where header is the name of the column header in the report,
+and field is the JMESPath of a specific field to include in the output. All available fields for a resource can be found in the ``resources.json`` file. 
+
+
+Next Steps
+----------
+* :ref:`Notify users of policy violations using a Logic App <azure_examples_notifications_logic_app>`
+* :ref:`More example policies <azure_examples>`

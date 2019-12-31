@@ -13,7 +13,7 @@
 # limitations under the License.
 from __future__ import absolute_import, division, print_function, unicode_literals
 
-
+import time
 from .common import BaseTest
 
 
@@ -39,6 +39,29 @@ class EKS(BaseTest):
         self.assertEqual(len(resources), 1)
         self.assertEqual(resources[0]['name'], 'dev')
 
+    def test_update_config(self):
+        factory = self.replay_flight_data('test_eks_update_config')
+        p = self.load_policy({
+            'name': 'eksupdate',
+            'resource': 'eks',
+            'filters': [
+                {'name': 'devk8s'},
+                {'resourcesVpcConfig.endpointPublicAccess': True}],
+            'actions': [{
+                'type': 'update-config',
+                'resourcesVpcConfig': {
+                    'endpointPublicAccess': False,
+                    'endpointPrivateAccess': True
+                }}]}, session_factory=factory, config={'region': 'us-east-2'})
+        resources = p.run()
+        self.assertEqual(len(resources), 1)
+        if self.recording:
+            time.sleep(10)
+        client = factory().client('eks')
+        info = client.describe_cluster(name='devk8s')['cluster']
+        self.assertEqual(resources[0]['status'], 'ACTIVE')
+        self.assertEqual(info['status'], 'UPDATING')
+
     def test_delete_eks(self):
         factory = self.replay_flight_data("test_eks_delete")
         p = self.load_policy(
@@ -55,3 +78,22 @@ class EKS(BaseTest):
         client = factory().client("eks")
         cluster = client.describe_cluster(name='dev').get('cluster')
         self.assertEqual(cluster['status'], 'DELETING')
+
+    def test_tag_and_remove_tag(self):
+        factory = self.replay_flight_data('test_eks_tag_and_remove_tag')
+        p = self.load_policy({
+            'name': 'eks-tag-and-remove',
+            'resource': 'aws.eks',
+            'filters': [{'tag:Env': 'Dev'}],
+            'actions': [
+                {'type': 'tag', 'tags': {'App': 'Custodian'}},
+                {'type': 'remove-tag', 'tags': ['Env']}]},
+            session_factory=factory)
+        resources = p.run()
+        self.assertEqual(len(resources), 1)
+        self.assertEqual(resources[0]['name'], 'devx')
+        client = factory().client('eks')
+        self.assertEqual(
+            client.describe_cluster(
+                name='devx')['cluster']['tags'],
+            {'App': 'Custodian'})

@@ -13,39 +13,33 @@
 # limitations under the License.
 
 from c7n.manager import resources
-from c7n.query import QueryResourceManager
-from c7n.actions import ActionRegistry, BaseAction
-from c7n.filters import FilterRegistry
-from c7n.tags import Tag, TagDelayedAction, RemoveTag, coalesce_copy_user_tags
+from c7n.query import QueryResourceManager, TypeInfo
+from c7n.actions import BaseAction
+from c7n.tags import Tag, TagDelayedAction, RemoveTag, coalesce_copy_user_tags, TagActionFilter
 from c7n.utils import local_session, type_schema
+from c7n.filters.kms import KmsRelatedFilter
 
 
 @resources.register('fsx')
 class FSx(QueryResourceManager):
-    filter_registry = FilterRegistry('fsx.filters')
-    action_registry = ActionRegistry('fsx.actions')
 
-    class resource_type(object):
+    class resource_type(TypeInfo):
         service = 'fsx'
         enum_spec = ('describe_file_systems', 'FileSystems', None)
         name = id = 'FileSystemId'
+        arn = "ResourceARN"
         date = 'CreationTime'
-        dimension = None
-        filter_name = None
 
 
 @resources.register('fsx-backup')
 class FSxBackup(QueryResourceManager):
-    filter_registry = FilterRegistry('fsx-baackup.filters')
-    action_registry = ActionRegistry('fsx-baackup.actions')
 
-    class resource_type(object):
+    class resource_type(TypeInfo):
         service = 'fsx'
         enum_spec = ('describe_backups', 'Backups', None)
         name = id = 'BackupId'
+        arn = "ResourceARN"
         date = 'CreationTime'
-        dimension = None
-        filter_name = None
 
 
 @FSxBackup.action_registry.register('delete')
@@ -55,10 +49,10 @@ class DeleteBackup(BaseAction):
 
     :example:
 
-    .. code-block: yaml
+    .. code-block:: yaml
 
         policies:
-            - type: delete-backups
+            - name: delete-backups
               resource: fsx-backup
               filters:
                 - type: value
@@ -83,17 +77,16 @@ class DeleteBackup(BaseAction):
                         r['FileSystemId'], r['BackupId'], e))
 
 
+FSxBackup.filter_registry.register('marked-for-op', TagActionFilter)
+
+FSx.filter_registry.register('marked-for-op', TagActionFilter)
+
+
 @FSxBackup.action_registry.register('mark-for-op')
 @FSx.action_registry.register('mark-for-op')
 class MarkForOpFileSystem(TagDelayedAction):
-    concurrency = 2
-    batch_size = 5
-    permissions = ('fsx:TagResource',)
 
-    def process_resource_set(self, resources, tags):
-        client = local_session(self.manager.session_factory).client('fsx')
-        for r in resources:
-            client.tag_resource(ResourceARN=r['ResourceARN'], Tags=tags)
+    permissions = ('fsx:TagResource',)
 
 
 @FSxBackup.action_registry.register('tag')
@@ -103,8 +96,7 @@ class TagFileSystem(Tag):
     batch_size = 5
     permissions = ('fsx:TagResource',)
 
-    def process_resource_set(self, resources, tags):
-        client = local_session(self.manager.session_factory).client('fsx')
+    def process_resource_set(self, client, resources, tags):
         for r in resources:
             client.tag_resource(ResourceARN=r['ResourceARN'], Tags=tags)
 
@@ -116,8 +108,7 @@ class UnTagFileSystem(RemoveTag):
     batch_size = 5
     permissions = ('fsx:UntagResource',)
 
-    def process_resource_set(self, resources, tag_keys):
-        client = local_session(self.manager.session_factory).client('fsx')
+    def process_resource_set(self, client, resources, tag_keys):
         for r in resources:
             client.untag_resource(ResourceARN=r['ResourceARN'], TagKeys=tag_keys)
 
@@ -129,7 +120,7 @@ class UpdateFileSystem(BaseAction):
 
     :example:
 
-    .. code-block: yaml
+    .. code-block:: yaml
 
         policies:
             - name: update-fsx-resource
@@ -172,7 +163,7 @@ class BackupFileSystem(BaseAction):
 
     :example:
 
-    .. code-block: yaml
+    .. code-block:: yaml
 
         policies:
             - name: backup-fsx-resource
@@ -253,7 +244,7 @@ class DeleteFileSystem(BaseAction):
 
     :example:
 
-    .. code-block: yaml
+    .. code-block:: yaml
 
         policies:
             - name: delete-fsx-instance-with-snapshot
@@ -320,3 +311,47 @@ class DeleteFileSystem(BaseAction):
                 )
             except client.exceptions.BadRequest as e:
                 self.log.warning('Unable to delete: %s - %s' % (r['FileSystemId'], e))
+
+
+@FSx.filter_registry.register('kms-key')
+class KmsFilter(KmsRelatedFilter):
+    """
+    Filter a resource by its associcated kms key and optionally the aliasname
+    of the kms key by using 'c7n:AliasName'
+
+    :example:
+
+        .. code-block:: yaml
+
+            policies:
+                - name: fsx-kms-key-filters
+                  resource: fsx
+                  filters:
+                    - type: kms-key
+                      key: c7n:AliasName
+                      value: "^(alias/aws/fsx)"
+                      op: regex
+    """
+    RelatedIdsExpression = 'KmsKeyId'
+
+
+@FSxBackup.filter_registry.register('kms-key')
+class KmsFilterFsxBackup(KmsRelatedFilter):
+    """
+    Filter a resource by its associcated kms key and optionally the aliasname
+    of the kms key by using 'c7n:AliasName'
+
+    :example:
+
+        .. code-block:: yaml
+
+            policies:
+                - name: fsx-backup-kms-key-filters
+                  resource: fsx-backup
+                  filters:
+                    - type: kms-key
+                      key: c7n:AliasName
+                      value: "^(alias/aws/fsx)"
+                      op: regex
+    """
+    RelatedIdsExpression = 'KmsKeyId'

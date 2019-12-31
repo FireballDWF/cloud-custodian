@@ -13,56 +13,26 @@
 # limitations under the License.
 from __future__ import absolute_import, division, print_function, unicode_literals
 
-import functools
-
 from c7n.manager import resources
-from c7n.query import QueryResourceManager
+from c7n.query import QueryResourceManager, TypeInfo
 from c7n.tags import (RemoveTag, Tag, universal_augment)
-from c7n.utils import generate_arn, local_session
 
 
 @resources.register('cloudhsm-cluster')
 class CloudHSMCluster(QueryResourceManager):
 
-    class resource_type(object):
+    class resource_type(TypeInfo):
         service = 'cloudhsmv2'
-        type = 'cluster'
-        resource_type = 'cloudhsm'
+        arn_type = 'cluster'
+        arn_service = 'cloudhsm'
         enum_spec = ('describe_clusters', 'Clusters', None)
         id = name = 'ClusterId'
         filter_name = 'Filters'
         filter_type = 'scalar'
-        dimension = None
         # universal_taggable = True
         # Note: resourcegroupstaggingapi still points to hsm-classic
 
     augment = universal_augment
-    _generate_arn = None
-
-    @property
-    def generate_arn(self):
-        if self._generate_arn is None:
-            self._generate_arn = functools.partial(
-                generate_arn,
-                'cloudhsm',
-                region=self.config.region,
-                account_id=self.account_id,
-                resource_type='cluster',
-                separator='/')
-        return self._generate_arn
-
-
-def tag_function(session_factory, clusters, tags, log):
-    client = local_session(session_factory).client('cloudhsmv2')
-    for c in clusters:
-        id = c['ClusterId']
-        try:
-            client.tag_resource(ResourceId=id, TagList=tags)
-        except Exception as err:
-            log.exception(
-                'Exception tagging cloudhsm cluster %s: %s',
-                c['ClusterId'], err)
-            continue
 
 
 @CloudHSMCluster.action_registry.register('tag')
@@ -74,7 +44,7 @@ class Tag(Tag):
     .. code-block:: yaml
 
             policies:
-              - name: cloudhsm
+              - name: cloudhsm-tag
                 resource: aws.cloudhsm-cluster
                 filters:
                   - "tag:OwnerName": missing
@@ -86,8 +56,12 @@ class Tag(Tag):
 
     permissions = ('cloudhsmv2:TagResource',)
 
-    def process_resource_set(self, clusters, tags):
-        tag_function(self.manager.session_factory, clusters, tags, self.log)
+    def process_resource_set(self, client, clusters, tags):
+        for c in clusters:
+            try:
+                client.tag_resource(ResourceId=c['ClusterId'], TagList=tags)
+            except client.exceptions.CloudHsmResourceNotFoundException:
+                continue
 
 
 @CloudHSMCluster.action_registry.register('remove-tag')
@@ -99,7 +73,7 @@ class RemoveTag(RemoveTag):
     .. code-block:: yaml
 
             policies:
-              - name: cloudhsm
+              - name: cloudhsm-remove-tag
                 resource: aws.cloudhsm-cluster
                 filters:
                   - "tag:OldTagKey": present
@@ -110,49 +84,41 @@ class RemoveTag(RemoveTag):
 
     permissions = ('cloudhsmv2:UntagResource',)
 
-    def process_resource_set(self, clusters, tag_keys):
-        client = local_session(self.manager.session_factory).client('cloudhsmv2')
+    def process_resource_set(self, client, clusters, tag_keys):
         for c in clusters:
-            id = c['ClusterId']
-            client.untag_resource(ResourceId=id, TagKeyList=tag_keys)
+            client.untag_resource(ResourceId=c['ClusterId'], TagKeyList=tag_keys)
 
 
 @resources.register('hsm')
 class CloudHSM(QueryResourceManager):
 
-    class resource_type(object):
+    class resource_type(TypeInfo):
         service = 'cloudhsm'
         enum_spec = ('list_hsms', 'HsmList', None)
-        id = 'HsmArn'
+        arn = id = 'HsmArn'
+        arn_type = 'cluster'
         name = 'Name'
-        date = dimension = None
-        detail_spec = (
-            "describe_hsm", "HsmArn", None, None)
-        filter_name = None
+        detail_spec = ("describe_hsm", "HsmArn", None, None)
 
 
 @resources.register('hsm-hapg')
 class PartitionGroup(QueryResourceManager):
 
-    class resource_type(object):
+    class resource_type(TypeInfo):
         service = 'cloudhsm'
         enum_spec = ('list_hapgs', 'HapgList', None)
         detail_spec = ('describe_hapg', 'HapgArn', None, None)
-        id = 'HapgArn'
+        arn = id = 'HapgArn'
         name = 'HapgSerial'
         date = 'LastModifiedTimestamp'
-        dimension = None
-        filter_name = None
 
 
 @resources.register('hsm-client')
 class HSMClient(QueryResourceManager):
 
-    class resource_type(object):
+    class resource_type(TypeInfo):
         service = 'cloudhsm'
         enum_spec = ('list_luna_clients', 'ClientList', None)
         detail_spec = ('describe_luna_client', 'ClientArn', None, None)
-        id = 'ClientArn'
+        arn = id = 'ClientArn'
         name = 'Label'
-        date = dimension = None
-        filter_name = None

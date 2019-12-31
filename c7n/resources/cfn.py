@@ -19,7 +19,7 @@ from concurrent.futures import as_completed
 
 from c7n.actions import BaseAction
 from c7n.manager import resources
-from c7n.query import QueryResourceManager
+from c7n.query import QueryResourceManager, TypeInfo
 from c7n.utils import local_session, type_schema
 from c7n.tags import RemoveTag, Tag
 
@@ -29,16 +29,15 @@ log = logging.getLogger('custodian.cfn')
 @resources.register('cfn')
 class CloudFormation(QueryResourceManager):
 
-    class resource_type(object):
+    class resource_type(TypeInfo):
         service = 'cloudformation'
-        type = 'stack'
+        arn_type = 'stack'
         enum_spec = ('describe_stacks', 'Stacks[]', None)
         id = 'StackName'
         filter_name = 'StackName'
         filter_type = 'scalar'
         name = 'StackName'
         date = 'CreationTime'
-        dimension = None
         config_type = 'AWS::CloudFormation::Stack'
 
 
@@ -126,7 +125,7 @@ class CloudFormationAddTag(Tag):
 
     :example:
 
-    .. code-block: yaml
+    .. code-block:: yaml
 
         policies:
           - name: add-cfn-tag
@@ -135,28 +134,46 @@ class CloudFormationAddTag(Tag):
               - 'tag:DesiredTag': absent
             actions:
               - type: tag
-                key: DesiredTag
-                value: DesiredValue
+                tags:
+                  DesiredTag: DesiredValue
     """
     permissions = ('cloudformation:UpdateStack',)
 
-    def process_resource_set(self, stacks, tags):
-        client = local_session(
-            self.manager.session_factory).client('cloudformation')
+    def process_resource_set(self, client, stacks, tags):
+        for s in stacks:
+            _tag_stack(client, s, add=tags)
 
-        def _tag_stacks(s):
-            params = []
-            for p in s.get('Parameters', []):
-                params.append({'ParameterKey': p['ParameterKey'],
-                               'UsePreviousValue': True})
-            client.update_stack(
-                StackName=s['StackName'],
-                UsePreviousTemplate=True,
-                Parameters=params,
-                Tags=tags)
 
-        with self.executor_factory(max_workers=2) as w:
-            list(w.map(_tag_stacks, stacks))
+def _tag_stack(client, s, add=(), remove=()):
+
+    tags = {t['Key']: t['Value'] for t in s.get('Tags')}
+    for t in remove:
+        tags.pop(t, None)
+
+    for t in add:
+        tags[t['Key']] = t['Value']
+
+    params = []
+    for p in s.get('Parameters', []):
+        params.append(
+            {'ParameterKey': p['ParameterKey'],
+             'UsePreviousValue': True})
+
+    capabilities = []
+    for c in s.get('Capabilities', []):
+        capabilities.append(c)
+
+    notifications = []
+    for n in s.get('NotificationArns', []):
+        notifications.append(n)
+
+    client.update_stack(
+        StackName=s['StackName'],
+        UsePreviousTemplate=True,
+        Capabilities=capabilities,
+        Parameters=params,
+        NotificationARNs=notifications,
+        Tags=[{'Key': k, 'Value': v} for k, v in tags.items()])
 
 
 @CloudFormation.action_registry.register('remove-tag')
@@ -165,10 +182,10 @@ class CloudFormationRemoveTag(RemoveTag):
 
     :example:
 
-    .. code-block: yaml
+    .. code-block:: yaml
 
         policies:
-          - name: add-cfn-tag
+          - name: remove-cfn-tag
             resource: cfn
             filters:
               - 'tag:DesiredTag': present
@@ -177,16 +194,6 @@ class CloudFormationRemoveTag(RemoveTag):
                 tags: ['DesiredTag']
     """
 
-    def process_resource_set(self, stacks, keys):
-        client = local_session(
-            self.manager.session_factory).client('cloudformation')
-
-        def _remove_tag(s):
-            tags = [t for t in s['Tags'] if t['Key'] not in keys]
-            client.update_stack(
-                StackName=s['StackName'],
-                UsePreviousTemplate=True,
-                Tags=tags)
-
-        with self.executor_factory(max_workers=2) as w:
-            list(w.map(_remove_tag, stacks))
+    def process_resource_set(self, client, stacks, keys):
+        for s in stacks:
+            _tag_stack(client, s, remove=keys)

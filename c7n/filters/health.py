@@ -21,15 +21,20 @@ from c7n.manager import resources
 
 
 class HealthEventFilter(Filter):
-    """Check if there are health events related to the resources
+    """Check if there are operations health events (phd) related to the resources
 
-
+    https://aws.amazon.com/premiumsupport/technology/personal-health-dashboard/
 
     Health events are stored as annotation on a resource.
+
+    Custodian also supports responding to phd events via a lambda execution mode.
     """
+    schema_alias = True
     schema = type_schema(
         'health-event',
         types={'type': 'array', 'items': {'type': 'string'}},
+        category={'type': 'array', 'items': {
+            'enum': ['issue', 'accountNotification', 'scheduledChange']}},
         statuses={'type': 'array', 'items': {
             'type': 'string',
             'enum': ['open', 'upcoming', 'closed']

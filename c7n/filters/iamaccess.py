@@ -27,8 +27,11 @@ are.
 
 References
 
-- IAM Policy Evaluation - http://goo.gl/sH5Dt5
-- IAM Policy Reference - http://goo.gl/U0a06y
+- IAM Policy Evaluation
+  https://docs.aws.amazon.com/IAM/latest/UserGuide/reference_policies_evaluation-logic.html
+
+- IAM Policy Reference
+  https://docs.aws.amazon.com/IAM/latest/UserGuide/reference_policies_elements.html
 
 """
 from __future__ import absolute_import, division, print_function, unicode_literals
@@ -267,13 +270,13 @@ class CrossAccountAccessFilter(Filter):
         # disregard statements using these conditions.
         whitelist_conditions={'type': 'array', 'items': {'type': 'string'}},
         # white list accounts
-        whitelist_from=ValuesFrom.schema,
+        whitelist_from={'$ref': '#/definitions/filters_common/value_from'},
         whitelist={'type': 'array', 'items': {'type': 'string'}},
-        whitelist_orgids_from=ValuesFrom.schema,
+        whitelist_orgids_from={'$ref': '#/definitions/filters_common/value_from'},
         whitelist_orgids={'type': 'array', 'items': {'type': 'string'}},
-        whitelist_vpce_from=ValuesFrom.schema,
+        whitelist_vpce_from={'$ref': '#/definitions/filters_common/value_from'},
         whitelist_vpce={'type': 'array', 'items': {'type': 'string'}},
-        whitelist_vpc_from=ValuesFrom.schema,
+        whitelist_vpc_from={'$ref': '#/definitions/filters_common/value_from'},
         whitelist_vpc={'type': 'array', 'items': {'type': 'string'}})
 
     policy_attribute = 'Policy'

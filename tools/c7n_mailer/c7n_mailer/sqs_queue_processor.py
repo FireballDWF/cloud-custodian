@@ -55,7 +55,9 @@ class MailerSqsQueueIterator(object):
             QueueUrl=self.queue_url,
             WaitTimeSeconds=self.timeout,
             MaxNumberOfMessages=3,
-            MessageAttributeNames=self.msg_attributes)
+            MessageAttributeNames=self.msg_attributes,
+            AttributeNames=['SentTimestamp']
+        )
 
         msgs = response.get('Messages', [])
         self.logger.debug('Messages received %d', len(msgs))
@@ -169,7 +171,8 @@ class MailerSqsQueueProcessor(object):
 
         # this section sends a notification to the resource owner via Slack
         if any(e.startswith('slack') or e.startswith('https://hooks.slack.com/')
-                for e in sqs_message.get('action', ()).get('to')):
+                for e in sqs_message.get('action', ()).get('to', []) +
+                sqs_message.get('action', ()).get('owner_absent_contact', [])):
             from .slack_delivery import SlackDelivery
 
             if self.config.get('slack_token'):
@@ -192,6 +195,23 @@ class MailerSqsQueueProcessor(object):
 
             try:
                 datadog_delivery.deliver_datadog_messages(datadog_message_packages, sqs_message)
+            except Exception:
+                traceback.print_exc()
+                pass
+
+        # this section sends the full event to a Splunk HTTP Event Collector (HEC)
+        if any(
+            e.startswith('splunkhec://')
+            for e in sqs_message.get('action', ()).get('to')
+        ):
+            from .splunk_delivery import SplunkHecDelivery
+            splunk_delivery = SplunkHecDelivery(self.config, self.session, self.logger)
+            splunk_messages = splunk_delivery.get_splunk_payloads(
+                sqs_message, encoded_sqs_message['Attributes']['SentTimestamp']
+            )
+
+            try:
+                splunk_delivery.deliver_splunk_messages(splunk_messages)
             except Exception:
                 traceback.print_exc()
                 pass

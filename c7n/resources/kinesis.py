@@ -17,7 +17,7 @@ import jmespath
 
 from c7n.actions import Action
 from c7n.manager import resources
-from c7n.query import QueryResourceManager
+from c7n.query import QueryResourceManager, TypeInfo
 from c7n.tags import universal_augment
 from c7n.utils import local_session, type_schema, get_retry
 
@@ -28,16 +28,13 @@ class KinesisStream(QueryResourceManager):
         get_retry((
             'LimitExceededException',)))
 
-    class resource_type(object):
+    class resource_type(TypeInfo):
         service = 'kinesis'
-        type = 'stream'
+        arn_type = 'stream'
         enum_spec = ('list_streams', 'StreamNames', None)
         detail_spec = (
             'describe_stream', 'StreamName', None, 'StreamDescription')
         name = id = 'StreamName'
-        filter_name = None
-        filter_type = None
-        date = None
         dimension = 'StreamName'
         universal_taggable = True
 
@@ -94,18 +91,21 @@ class Delete(Action):
 @resources.register('firehose')
 class DeliveryStream(QueryResourceManager):
 
-    class resource_type(object):
+    class resource_type(TypeInfo):
         service = 'firehose'
-        type = 'deliverystream'
+        arn_type = 'deliverystream'
         enum_spec = ('list_delivery_streams', 'DeliveryStreamNames', None)
         detail_spec = (
             'describe_delivery_stream', 'DeliveryStreamName', None,
             'DeliveryStreamDescription')
         name = id = 'DeliveryStreamName'
-        filter_name = None
-        filter_type = None
         date = 'CreateTimestamp'
         dimension = 'DeliveryStreamName'
+        universal_taggable = object()
+
+    def augment(self, resources):
+        return universal_augment(
+            self, super(DeliveryStream, self).augment(resources))
 
 
 @DeliveryStream.action_registry.register('delete')
@@ -216,16 +216,19 @@ class FirehoseEncryptS3Destination(Action):
 @resources.register('kinesis-analytics')
 class AnalyticsApp(QueryResourceManager):
 
-    class resource_type(object):
+    class resource_type(TypeInfo):
         service = "kinesisanalytics"
         enum_spec = ('list_applications', 'ApplicationSummaries', None)
         detail_spec = ('describe_application', 'ApplicationName',
                        'ApplicationName', 'ApplicationDetail')
         name = "ApplicationName"
-        id = "ApplicationARN"
-        dimension = None
-        filter_name = None
-        filter_type = None
+        arn = id = "ApplicationARN"
+        arn_type = 'application'
+        universal_taggable = object()
+
+    def augment(self, resources):
+        return universal_augment(
+            self, super(AnalyticsApp, self).augment(resources))
 
 
 @AnalyticsApp.action_registry.register('delete')

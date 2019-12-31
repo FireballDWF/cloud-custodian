@@ -17,12 +17,11 @@ Application Load Balancers
 from __future__ import absolute_import, division, print_function, unicode_literals
 
 import json
-import itertools
 import logging
 import six
 
 from collections import defaultdict
-from c7n.actions import ActionRegistry, BaseAction
+from c7n.actions import ActionRegistry, BaseAction, ModifyVpcSecurityGroupsAction
 from c7n.exceptions import PolicyValidationError
 from c7n.filters import (
     Filter, FilterRegistry, DefaultVpcBase, MetricsFilter, ValueFilter)
@@ -30,7 +29,7 @@ import c7n.filters.vpc as net_filters
 from c7n import tags
 from c7n.manager import resources
 
-from c7n.query import QueryResourceManager, DescribeSource, ConfigSource
+from c7n.query import QueryResourceManager, DescribeSource, ConfigSource, TypeInfo
 from c7n.utils import (
     local_session, chunks, type_schema, get_retry, set_annotation)
 
@@ -38,21 +37,14 @@ from c7n.resources.shield import IsShieldProtected, SetShieldProtection
 
 log = logging.getLogger('custodian.app-elb')
 
-filters = FilterRegistry('app-elb.filters')
-actions = ActionRegistry('app-elb.actions')
-
-filters.register('tag-count', tags.TagCountFilter)
-filters.register('marked-for-op', tags.TagActionFilter)
-
 
 @resources.register('app-elb')
 class AppELB(QueryResourceManager):
-    """Resource manager for v2 ELBs (AKA ALBs).
+    """Resource manager for v2 ELBs (AKA ALBs and NLBs).
     """
 
-    class resource_type(object):
+    class resource_type(TypeInfo):
         service = 'elbv2'
-        type = 'loadbalancer/app'
         enum_spec = ('describe_load_balancers', 'LoadBalancers', None)
         name = 'LoadBalancerName'
         id = 'LoadBalancerArn'
@@ -61,9 +53,10 @@ class AppELB(QueryResourceManager):
         dimension = "LoadBalancer"
         date = 'CreatedTime'
         config_type = 'AWS::ElasticLoadBalancingV2::LoadBalancer'
+        arn = "LoadBalancerArn"
+        # The suffix varies by type of loadbalancer (app vs net)
+        arn_type = 'loadbalancer/app'
 
-    filter_registry = filters
-    action_registry = actions
     retry = staticmethod(get_retry(('Throttling',)))
 
     @classmethod
@@ -72,9 +65,6 @@ class AppELB(QueryResourceManager):
         return ("elasticloadbalancing:DescribeLoadBalancers",
                 "elasticloadbalancing:DescribeLoadBalancerAttributes",
                 "elasticloadbalancing:DescribeTags")
-
-    def get_arn(self, r):
-        return r[self.resource_type.id]
 
     def get_source(self, source_type):
         if source_type == 'describe':
@@ -146,29 +136,20 @@ def _describe_appelb_tags(albs, session_factory, executor_factory, retry):
         list(w.map(_process_tags, chunks(albs, 20)))
 
 
-def _add_appelb_tags(albs, session_factory, ts):
-    client = local_session(session_factory).client('elbv2')
-    client.add_tags(
-        ResourceArns=[alb['LoadBalancerArn'] for alb in albs],
-        Tags=ts)
+AppELB.filter_registry.register('tag-count', tags.TagCountFilter)
+AppELB.filter_registry.register('marked-for-op', tags.TagActionFilter)
+AppELB.filter_registry.register('shield-enabled', IsShieldProtected)
+AppELB.filter_registry.register('network-location', net_filters.NetworkLocation)
+AppELB.action_registry.register('set-shield', SetShieldProtection)
 
 
-def _remove_appelb_tags(albs, session_factory, tag_keys):
-    client = local_session(session_factory).client('elbv2')
-    client.remove_tags(
-        ResourceArns=[alb['LoadBalancerArn'] for alb in albs],
-        TagKeys=tag_keys)
-
-
-filters.register('shield-enabled', IsShieldProtected)
-actions.register('set-shield', SetShieldProtection)
-
-
-@filters.register('metrics')
+@AppELB.filter_registry.register('metrics')
 class AppElbMetrics(MetricsFilter):
     """Filter app load balancer by metric values.
 
-    See available metrics here: https://goo.gl/TLQ9Fr
+    See available metrics here
+    https://docs.aws.amazon.com/elasticloadbalancing/latest/application/load-balancer-cloudwatch-metrics.html
+
     Custodian defaults to specifying dimensions for the app elb only.
     Target Group dimension not supported atm.
     """
@@ -181,25 +162,22 @@ class AppElbMetrics(MetricsFilter):
                 resource[self.model.id].rsplit('/')[-1])}]
 
 
-@filters.register('security-group')
+@AppELB.filter_registry.register('security-group')
 class SecurityGroupFilter(net_filters.SecurityGroupFilter):
 
     RelatedIdsExpression = "SecurityGroups[]"
 
 
-@filters.register('subnet')
+@AppELB.filter_registry.register('subnet')
 class SubnetFilter(net_filters.SubnetFilter):
 
     RelatedIdsExpression = "AvailabilityZones[].SubnetId"
 
 
-@filters.register('vpc')
+@AppELB.filter_registry.register('vpc')
 class VpcFilter(net_filters.VpcFilter):
 
     RelatedIdsExpression = "VpcId"
-
-
-filters.register('network-location', net_filters.NetworkLocation)
 
 
 @AppELB.filter_registry.register('waf-enabled')
@@ -239,7 +217,7 @@ class WafEnabled(Filter):
 
         # generally frown on runtime validation errors, but also frown on
         # api calls during validation.
-        if target_acl_id not in name_id_map.values():
+        if target_acl and target_acl_id not in name_id_map.values():
             raise ValueError("Invalid target acl:%s, acl not found" % target_acl)
 
         arn_key = self.manager.resource_type.id
@@ -314,7 +292,7 @@ class SetWaf(BaseAction):
                     WebACLId=target_acl_id, ResourceArn=r[arn_key])
 
 
-@actions.register('set-s3-logging')
+@AppELB.action_registry.register('set-s3-logging')
 class SetS3Logging(BaseAction):
     """Action to enable/disable S3 logging for an application loadbalancer.
 
@@ -330,9 +308,10 @@ class SetS3Logging(BaseAction):
                     key: Attributes."access_logs.s3.enabled"
                     value: False
                 actions:
-                  - type: enable-s3-logging
+                  - type: set-s3-logging
                     bucket: elbv2logtest
                     prefix: dahlogs
+                    state: enabled
     """
     schema = type_schema(
         'set-s3-logging',
@@ -380,7 +359,7 @@ class SetS3Logging(BaseAction):
                 LoadBalancerArn=elb_arn, Attributes=attributes)
 
 
-@actions.register('mark-for-op')
+@AppELB.action_registry.register('mark-for-op')
 class AppELBMarkForOpAction(tags.TagDelayedAction):
     """Action to create a delayed action on an ELB to start at a later date
 
@@ -403,16 +382,9 @@ class AppELBMarkForOpAction(tags.TagDelayedAction):
     """
 
     batch_size = 1
-    permissions = ("elasticloadbalancing:AddTags",)
-
-    def process_resource_set(self, resource_set, ts):
-        _add_appelb_tags(
-            resource_set,
-            self.manager.session_factory,
-            ts)
 
 
-@actions.register('tag')
+@AppELB.action_registry.register('tag')
 class AppELBTagAction(tags.Tag):
     """Action to create tag/tags on an ELB
 
@@ -434,14 +406,13 @@ class AppELBTagAction(tags.Tag):
     batch_size = 1
     permissions = ("elasticloadbalancing:AddTags",)
 
-    def process_resource_set(self, resource_set, ts):
-        _add_appelb_tags(
-            resource_set,
-            self.manager.session_factory,
-            ts)
+    def process_resource_set(self, client, resource_set, ts):
+        client.add_tags(
+            ResourceArns=[alb['LoadBalancerArn'] for alb in resource_set],
+            Tags=ts)
 
 
-@actions.register('remove-tag')
+@AppELB.action_registry.register('remove-tag')
 class AppELBRemoveTagAction(tags.RemoveTag):
     """Action to remove tag/tags from an ELB
 
@@ -462,14 +433,13 @@ class AppELBRemoveTagAction(tags.RemoveTag):
     batch_size = 1
     permissions = ("elasticloadbalancing:RemoveTags",)
 
-    def process_resource_set(self, resource_set, tag_keys):
-        _remove_appelb_tags(
-            resource_set,
-            self.manager.session_factory,
-            tag_keys)
+    def process_resource_set(self, client, resource_set, tag_keys):
+        client.remove_tags(
+            ResourceArns=[alb['LoadBalancerArn'] for alb in resource_set],
+            TagKeys=tag_keys)
 
 
-@actions.register('delete')
+@AppELB.action_registry.register('delete')
 class AppELBDeleteAction(BaseAction):
     """Action to delete an ELB
 
@@ -527,8 +497,11 @@ class AppELBListenerFilterBase(object):
         client = local_session(self.manager.session_factory).client('elbv2')
         self.listener_map = defaultdict(list)
         for alb in albs:
-            results = client.describe_listeners(
-                LoadBalancerArn=alb['LoadBalancerArn'])
+            try:
+                results = client.describe_listeners(
+                    LoadBalancerArn=alb['LoadBalancerArn'])
+            except client.exceptions.LoadBalancerNotFoundException:
+                continue
             self.listener_map[alb['LoadBalancerArn']] = results['Listeners']
 
 
@@ -564,7 +537,7 @@ class AppELBAttributeFilterBase(object):
             list(w.map(_process_attributes, albs))
 
 
-@filters.register('is-logging')
+@AppELB.filter_registry.register('is-logging')
 class IsLoggingFilter(Filter, AppELBAttributeFilterBase):
     """ Matches AppELBs that are logging to S3.
         bucket and prefix are optional
@@ -607,7 +580,7 @@ class IsLoggingFilter(Filter, AppELBAttributeFilterBase):
                 ]
 
 
-@filters.register('is-not-logging')
+@AppELB.filter_registry.register('is-not-logging')
 class IsNotLoggingFilter(Filter, AppELBAttributeFilterBase):
     """ Matches AppELBs that are NOT logging to S3.
         or do not match the optional bucket and/or prefix.
@@ -663,7 +636,7 @@ class AppELBTargetGroupFilterBase(object):
                 self.target_group_map[load_balancer_arn].append(target_group)
 
 
-@filters.register('listener')
+@AppELB.filter_registry.register('listener')
 class AppELBListenerFilter(ValueFilter, AppELBListenerFilterBase):
     """Filter ALB based on matching listener attributes
 
@@ -692,6 +665,7 @@ class AppELBListenerFilter(ValueFilter, AppELBListenerFilterBase):
 
     schema = type_schema(
         'listener', rinherit=ValueFilter.schema, matched={'type': 'boolean'})
+    schema_alias = False
     permissions = ("elasticloadbalancing:DescribeLoadBalancerAttributes",)
 
     def validate(self):
@@ -726,7 +700,7 @@ class AppELBListenerFilter(ValueFilter, AppELBListenerFilterBase):
         return found_listeners
 
 
-@actions.register('modify-listener')
+@AppELB.action_registry.register('modify-listener')
 class AppELBModifyListenerPolicy(BaseAction):
     """Action to modify the policy for an App ELB
 
@@ -777,18 +751,34 @@ class AppELBModifyListenerPolicy(BaseAction):
             args['SslPolicy'] = self.data.get('sslpolicy')
         if 'certificate' in self.data:
             args['Certificates'] = [{'CertificateArn': self.data.get('certificate')}]
-        with self.executor_factory(max_workers=2) as w:
-            list(w.map(self.process_alb, load_balancers, itertools.repeat(args)))
-
-    def process_alb(self, alb, args):
         client = local_session(self.manager.session_factory).client('elbv2')
-        for matched_listener in alb.get('c7n:MatchedListeners', ()):
-            client.modify_listener(
-                ListenerArn=matched_listener['ListenerArn'],
-                **args)
+
+        for alb in load_balancers:
+            for matched_listener in alb.get('c7n:MatchedListeners', ()):
+                client.modify_listener(
+                    ListenerArn=matched_listener['ListenerArn'],
+                    **args)
 
 
-@filters.register('healthcheck-protocol-mismatch')
+@AppELB.action_registry.register('modify-security-groups')
+class AppELBModifyVpcSecurityGroups(ModifyVpcSecurityGroupsAction):
+
+    permissions = ("elasticloadbalancing:SetSecurityGroups",)
+
+    def process(self, albs):
+        client = local_session(self.manager.session_factory).client('elbv2')
+        groups = super(AppELBModifyVpcSecurityGroups, self).get_groups(albs)
+
+        for idx, i in enumerate(albs):
+            try:
+                client.set_security_groups(
+                    LoadBalancerArn=i['LoadBalancerArn'],
+                    SecurityGroups=groups[idx])
+            except client.exceptions.LoadBalancerNotFoundException:
+                continue
+
+
+@AppELB.filter_registry.register('healthcheck-protocol-mismatch')
 class AppELBHealthCheckProtocolMismatchFilter(Filter,
                                               AppELBTargetGroupFilterBase):
     """Filter AppELBs with mismatched health check protocols
@@ -823,11 +813,12 @@ class AppELBHealthCheckProtocolMismatchFilter(Filter,
         return [alb for alb in albs if _healthcheck_protocol_mismatch(alb)]
 
 
-@filters.register('target-group')
+@AppELB.filter_registry.register('target-group')
 class AppELBTargetGroupFilter(ValueFilter, AppELBTargetGroupFilterBase):
     """Filter ALB based on matching target group value"""
 
     schema = type_schema('target-group', rinherit=ValueFilter.schema)
+    schema_alias = False
     permissions = ("elasticloadbalancing:DescribeTargetGroups",)
 
     def process(self, albs, event=None):
@@ -839,7 +830,7 @@ class AppELBTargetGroupFilter(ValueFilter, AppELBTargetGroupFilterBase):
         return self.match(target_groups)
 
 
-@filters.register('default-vpc')
+@AppELB.filter_registry.register('default-vpc')
 class AppELBDefaultVpcFilter(DefaultVpcBase):
     """Filter all ELB that exist within the default vpc
 
@@ -865,17 +856,12 @@ class AppELBTargetGroup(QueryResourceManager):
     """Resource manager for v2 ELB target groups.
     """
 
-    class resource_type(object):
-
+    class resource_type(TypeInfo):
         service = 'elbv2'
-        type = 'app-elb-target-group'
+        arn_type = 'target-group'
         enum_spec = ('describe_target_groups', 'TargetGroups', None)
         name = 'TargetGroupName'
         id = 'TargetGroupArn'
-        filter_name = None
-        filter_type = None
-        dimension = None
-        date = None
 
     filter_registry = FilterRegistry('app-elb-target-group.filters')
     action_registry = ActionRegistry('app-elb-target-group.actions')
@@ -910,8 +896,9 @@ class AppELBTargetGroup(QueryResourceManager):
 
 def _describe_target_group_tags(target_groups, session_factory,
                                 executor_factory, retry):
+    client = local_session(session_factory).client('elbv2')
+
     def _process_tags(target_group_set):
-        client = local_session(session_factory).client('elbv2')
         target_group_map = {
             target_group['TargetGroupArn']:
                 target_group for target_group in target_group_set
@@ -931,36 +918,9 @@ def _describe_target_group_tags(target_groups, session_factory,
         list(w.map(_process_tags, chunks(target_groups, 20)))
 
 
-def _add_target_group_tags(target_groups, session_factory, ts):
-    client = local_session(session_factory).client('elbv2')
-    client.add_tags(
-        ResourceArns=[
-            target_group['TargetGroupArn'] for target_group in target_groups
-        ],
-        Tags=ts)
-
-
-def _remove_target_group_tags(target_groups, session_factory, tag_keys):
-    client = local_session(session_factory).client('elbv2')
-    client.remove_tags(
-        ResourceArns=[
-            target_group['TargetGroupArn'] for target_group in target_groups
-        ],
-        TagKeys=tag_keys)
-
-
 @AppELBTargetGroup.action_registry.register('mark-for-op')
 class AppELBTargetGroupMarkForOpAction(tags.TagDelayedAction):
     """Action to specify a delayed action on an ELB target group"""
-
-    batch_size = 1
-    permissions = ("elasticloadbalancing:AddTags",)
-
-    def process_resource_set(self, resource_set, ts):
-        _add_target_group_tags(
-            resource_set,
-            self.manager.session_factory,
-            ts)
 
 
 @AppELBTargetGroup.action_registry.register('tag')
@@ -985,11 +945,10 @@ class AppELBTargetGroupTagAction(tags.Tag):
     batch_size = 1
     permissions = ("elasticloadbalancing:AddTags",)
 
-    def process_resource_set(self, resource_set, ts):
-        _add_target_group_tags(
-            resource_set,
-            self.manager.session_factory,
-            ts)
+    def process_resource_set(self, client, resource_set, ts):
+        client.add_tags(
+            ResourceArns=[tgroup['TargetGroupArn'] for tgroup in resource_set],
+            Tags=ts)
 
 
 @AppELBTargetGroup.action_registry.register('remove-tag')
@@ -1013,11 +972,10 @@ class AppELBTargetGroupRemoveTagAction(tags.RemoveTag):
     batch_size = 1
     permissions = ("elasticloadbalancing:RemoveTags",)
 
-    def process_resource_set(self, resource_set, tag_keys):
-        _remove_target_group_tags(
-            resource_set,
-            self.manager.session_factory,
-            tag_keys)
+    def process_resource_set(self, client, resource_set, tag_keys):
+        client.remove_tags(
+            ResourceArns=[tgroup['TargetGroupArn'] for tgroup in resource_set],
+            TagKeys=tag_keys)
 
 
 @AppELBTargetGroup.filter_registry.register('default-vpc')

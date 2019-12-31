@@ -22,7 +22,7 @@ from c7n.actions import ActionRegistry, BaseAction
 from c7n.exceptions import PolicyValidationError
 from c7n.filters import FilterRegistry, MetricsFilter
 from c7n.manager import resources
-from c7n.query import QueryResourceManager
+from c7n.query import QueryResourceManager, TypeInfo
 from c7n.utils import (
     local_session, type_schema, get_retry)
 from c7n.tags import (
@@ -40,16 +40,14 @@ class EMRCluster(QueryResourceManager):
     """Resource manager for Elastic MapReduce clusters
     """
 
-    class resource_type(object):
+    class resource_type(TypeInfo):
         service = 'emr'
-        type = 'emr'
+        arn_type = 'emr'
         cluster_states = ['WAITING', 'BOOTSTRAPPING', 'RUNNING', 'STARTING']
         enum_spec = ('list_clusters', 'Clusters', {'ClusterStates': cluster_states})
         name = 'Name'
         id = 'Id'
         date = "Status.Timeline.CreationDateTime"
-        filter_name = None
-        dimension = None
 
     action_registry = actions
     filter_registry = filters
@@ -149,16 +147,6 @@ class TagDelayedAction(TagDelayedAction):
                     msg: "Cluster does not have required tags"
     """
 
-    permission = ('elasticmapreduce:AddTags',)
-    batch_size = 1
-    retry = staticmethod(get_retry(('ThrottlingException',)))
-
-    def process_resource_set(self, resources, tags):
-        client = local_session(
-            self.manager.session_factory).client('emr')
-        for r in resources:
-            self.retry(client.add_tags, ResourceId=r['Id'], Tags=tags)
-
 
 @actions.register('tag')
 class TagTable(Tag):
@@ -183,8 +171,7 @@ class TagTable(Tag):
     batch_size = 1
     retry = staticmethod(get_retry(('ThrottlingException',)))
 
-    def process_resource_set(self, resources, tags):
-        client = local_session(self.manager.session_factory).client('emr')
+    def process_resource_set(self, client, resources, tags):
         for r in resources:
             self.retry(client.add_tags, ResourceId=r['Id'], Tags=tags)
 
@@ -211,12 +198,9 @@ class UntagTable(RemoveTag):
     batch_size = 5
     permissions = ('elasticmapreduce:RemoveTags',)
 
-    def process_resource_set(self, resources, tag_keys):
-        client = local_session(
-            self.manager.session_factory).client('emr')
+    def process_resource_set(self, client, resources, tag_keys):
         for r in resources:
-            client.remove_tags(
-                ResourceId=r['Id'], TagKeys=tag_keys)
+            client.remove_tags(ResourceId=r['Id'], TagKeys=tag_keys)
 
 
 @actions.register('terminate')

@@ -32,3 +32,11 @@ results.xml
 .vscode/
 !.vscode/*.sample
 .pytest_cache/
+pyvenv.cfg
+junit
+/.vs
+docs/source/overview\.rst
+docs/source/tools/c7n-mailer\.md
+docs/source/tools/c7n-org\.md
+docs/source/tools/c7n-policystream\.md
+docs/source/*/resources

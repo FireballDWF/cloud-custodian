@@ -17,8 +17,8 @@ from datetime import datetime
 from dateutil import tz as tzutil
 
 from .common import BaseTest
-from botocore.exceptions import ClientError
-from c7n.resources.asg import NotEncryptedFilter
+
+from c7n.resources.asg import LaunchInfo
 
 
 class LaunchConfigTest(BaseTest):
@@ -75,6 +75,45 @@ class TestUserData(BaseTest):
         self.assertGreater(len(resources), 0)
 
 
+class AutoScalingTemplateTest(BaseTest):
+
+    def test_asg_mixed_instance_templates(self):
+        d = {
+            "AutoScalingGroupName": "devx",
+            "MixedInstancesPolicy": {
+                "LaunchTemplate": {
+                    "LaunchTemplateSpecification": {
+                        "LaunchTemplateId": "lt-0877401c93c294001",
+                        "LaunchTemplateName": "test",
+                        "Version": "4"},
+                    "Overrides": [{"InstanceType": "t1.micro"},
+                                  {"InstanceType": "t2.small"}]
+                },
+                "InstancesDistribution": {
+                    "OnDemandAllocationStrategy": "prioritized",
+                    "OnDemandBaseCapacity": 1,
+                    "OnDemandPercentageAboveBaseCapacity": 0,
+                    "SpotAllocationStrategy": "capacity-optimized"
+                }
+            },
+            "MinSize": 1,
+            "MaxSize": 1,
+            "DesiredCapacity": 1,
+            "DefaultCooldown": 300,
+            "AvailabilityZones": ["us-east-1d", "us-east-1e"],
+            "HealthCheckType": "EC2",
+            "HealthCheckGracePeriod": 300,
+            "VPCZoneIdentifier": "subnet-3a334610,subnet-e3b194de"}
+
+        p = self.load_policy({"name": "mixed-instance", "resource": "asg"})
+        self.assertEqual(
+            list(p.resource_manager.get_resource_manager(
+                'launch-template-version').get_asg_templates([d]).keys()),
+            [("lt-0877401c93c294001", "4")])
+        self.assertEqual(
+            LaunchInfo(p.resource_manager).get_launch_id(d), ("lt-0877401c93c294001", "4"))
+
+
 class AutoScalingTest(BaseTest):
 
     def get_ec2_tags(self, ec2, instance_id):
@@ -117,29 +156,21 @@ class AutoScalingTest(BaseTest):
         self.assertEqual(len(resources), 1)
         self.assertEqual(resources[0]["Unencrypted"], ["Image", "LaunchConfig"])
 
-    def test_get_bad_snapshot_malformed(self):
-        operation_name = "DescribeSnapshots"
-        error_response = {
-            "Error": {
-                "Message": 'Invalid id: "snap-malformedsnap"',
-                "Code": "InvalidSnapshotID.Malformed",
-            }
-        }
-        e = ClientError(error_response, operation_name)
-        snap = NotEncryptedFilter.get_bad_snapshot(e)
-        self.assertEqual(snap, "snap-malformedsnap")
-
-    def test_get_bad_snapshot_notfound(self):
-        operation_name = "DescribeSnapshots"
-        error_response = {
-            "Error": {
-                "Message": "The snapshot 'snap-notfound' does not exist.",
-                "Code": "InvalidSnapshot.NotFound",
-            }
-        }
-        e = ClientError(error_response, operation_name)
-        snap = NotEncryptedFilter.get_bad_snapshot(e)
-        self.assertEqual(snap, "snap-notfound")
+    def test_asg_non_encrypted_filter_with_templates(self):
+        factory = self.replay_flight_data("test_asg_non_encrypted_filter_with_templates")
+        p = self.load_policy(
+            {
+                "name": "asg-encrypted-with-launch-templates",
+                "resource": "asg",
+                "filters": [
+                    {"type": "not-encrypted"},
+                    {'LaunchTemplate': 'present'}
+                ],
+            },
+            session_factory=factory,
+        )
+        resources = p.run()
+        self.assertEqual(len(resources), 1)
 
     def test_asg_image_age_filter(self):
         factory = self.replay_flight_data("test_asg_image_age_filter")
@@ -148,6 +179,22 @@ class AutoScalingTest(BaseTest):
                 "name": "asg-cfg-filter",
                 "resource": "asg",
                 "filters": [{"type": "image-age", "days": 90}],
+            },
+            session_factory=factory,
+        )
+        resources = p.run()
+        self.assertEqual(len(resources), 1)
+
+    def test_asg_image_age_filter_template(self):
+        factory = self.replay_flight_data("test_asg_image_age_filter_template")
+        p = self.load_policy(
+            {
+                "name": "asg-cfg-filter",
+                "resource": "asg",
+                "filters": [
+                    {"type": "image-age", "days": 1, 'op': 'ge'},
+                    {"LaunchTemplate": "present"}
+                ],
             },
             session_factory=factory,
         )
@@ -565,6 +612,22 @@ class AutoScalingTest(BaseTest):
         )
         resources = p.run()
         self.assertEqual(len(resources), 0)
+
+    def test_valid_asg_with_launch_templates(self):
+        factory = self.replay_flight_data("test_valid_asg_with_launch_templates")
+        p = self.load_policy(
+            {
+                "name": "asg-valid-templates",
+                "resource": "asg",
+                "filters": [
+                    {"type": "valid"},
+                    {"LaunchTemplate": "present"}
+                ],
+            },
+            session_factory=factory,
+        )
+        resources = p.run()
+        self.assertEqual(len(resources), 1)
 
     def test_asg_invalid_filter_good(self):
         factory = self.replay_flight_data("test_asg_invalid_filter_good")
