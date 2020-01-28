@@ -1,4 +1,4 @@
-FROM python:3.7-slim-stretch
+FROM python:rc
 
 LABEL name="custodian" \
       description="Cloud Management Rules Engine" \
